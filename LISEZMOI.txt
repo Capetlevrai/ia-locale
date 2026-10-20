@@ -1,0 +1,78 @@
+IA locale pour Paseo (Capet Local) - version bêta
+=================================================
+
+Un agent de code qui tourne sur ta carte graphique, sans abonnement ni cloud.
+
+Ce qu'il faut
+-------------
+- Windows 10 ou 11, ou Linux (64 bits, x86_64), ou un Mac à puce Apple (M1 ou plus récent)
+- Une carte NVIDIA de 10 Go ou plus : RTX 3080, 2080 Ti, GTX 1080 Ti, cartes 12, 16 ou 24 Go
+  Pilote NVIDIA récent : 580 ou plus pour une RTX 50 ; sinon 551 ou plus sous Windows,
+  570 ou plus sous Linux.
+  Cartes AMD Radeon et Intel Arc (Windows), AMD (Linux) : prise en charge expérimentale
+  (moteur Vulkan, plus lent que sur NVIDIA). Pilote à jour obligatoire.
+  Mac : prise en charge expérimentale (moteur Metal). La mémoire est partagée : il faut
+  24 Go de mémoire pour les modèles « 16 Go », 32 Go ou plus pour les modèles « 24 Go ».
+- 16 Go de RAM minimum, 32 Go conseillés (surtout avec une carte de 10 à 12 Go)
+- 15 à 20 Go d'espace disque pour le modèle
+
+Les modèles proposés
+--------------------
+- Swift 1.5 (24 Go ou 16 Go) : le plus précis, conseillé par défaut sur ces cartes.
+- Qwen3.6 35B-A3B (24 Go, ou 10 à 16 Go) : beaucoup plus rapide (un petit jeu en une
+  à deux minutes). Sur les cartes de 10 à 16 Go, une partie du modèle passe tout seul
+  sur le processeur : c'est normal et ça reste rapide. C'est le modèle conseillé
+  pour les cartes de 10 à 12 Go.
+- Versions non censurées (Swift 1.5 16 Go, Qwen3.6 35B-A3B 12 et 16 Go) : mêmes
+  modèles, modifiés pour répondre aussi aux demandes que les autres refusent. Jamais
+  conseillées par défaut : à choisir soi-même dans IA locale. Tu es responsable de
+  l'usage que tu en fais.
+Le plugin marque « Recommandé pour ta carte » celui qu'il te conseille.
+
+Installation
+------------
+1. Double-clique sur CapetLocal-Setup.exe.
+   Windows peut afficher « Windows a protégé votre ordinateur » : clique sur
+   « Informations complémentaires » puis « Exécuter quand même ».
+2. Laisse-le travailler : environ 7 minutes avec la fibre, 20 minutes avec une connexion
+   à 100 Mb/s (le modèle pèse de 11 à 19 Go). Il installe tout seul :
+   Paseo, l'agent Oh My Pi, Node.js, le plugin, le moteur, puis télécharge et charge
+   le modèle conseillé pour ta carte. Les modèles vont sur le disque qui a le plus
+   de place si C: est presque plein.
+   Si Windows demande une autorisation (« Voulez-vous autoriser… ? »), clique sur Oui :
+   c'est pour installer Node.js ou agrandir la mémoire virtuelle. Reste devant l'écran
+   pendant l'installation.
+3. À la fin, Paseo s'ouvre : crée un agent et choisis « IA locale » comme
+   fournisseur. C'est prêt.
+
+Installation sur Mac ou Linux
+-----------------------------
+1. Télécharge CapetLocal-Setup.sh, puis ouvre le Terminal et tape :
+     bash ~/Downloads/CapetLocal-Setup.sh
+   (ou ~/Téléchargements/CapetLocal-Setup.sh selon le nom de ton dossier).
+   Aucun mot de passe administrateur n'est demandé.
+2. Il installe tout seul, comme sous Windows : Paseo, l'agent Oh My Pi, le plugin, le
+   moteur, puis le modèle conseillé. Node.js (outils navigateur de l'agent) s'installe
+   avec Homebrew sur Mac s'il est présent ; sous Linux, installe-le avec ta distribution.
+   Pour mettre les modèles sur un autre disque :
+     bash CapetLocal-Setup.sh --data-dir /chemin/vers/CapetLocal
+3. À la fin, Paseo s'ouvre : crée un agent et choisis « IA locale ».
+
+Bon à savoir
+------------
+- Tout est automatique : contexte, accélération MTP, marge de mémoire. Si la carte
+  manque de place, le plugin réduit le contexte tout seul et l'indique dans l'écran
+  IA locale.
+- Tu streames ou tu joues en même temps ? Dans IA locale, choisis « Budget VRAM »
+  et indique combien de Go laisser au modèle.
+- En bas à gauche de Paseo, le panneau IA locale montre ta carte graphique et la
+  VRAM utilisée. Choisis le modèle, puis Lancer (vert) ou Arrêter (rouge) pour
+  libérer la carte avant de jouer.
+- Le modèle se décharge après 30 minutes sans utilisation pour libérer la carte.
+
+En cas de souci
+---------------
+- Relance l'installateur : chaque étape vérifie avant d'agir, sans risque.
+- Le journal du moteur est dans CapetLocal/logs/llama-server.log : envoie-le avec ta
+  question. Dossier CapetLocal : %LOCALAPPDATA% sous Windows, ~/.local/share sous
+  Linux, ~/Library/Application Support sur Mac.
