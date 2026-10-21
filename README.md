@@ -4,12 +4,13 @@ Un agent de code qui tourne **sur ta machine**, sans abonnement ni cloud : un pl
 [Paseo](https://paseo.sh) qui installe et règle tout seul le moteur (llama.cpp), l'agent
 (Oh My Pi) et le modèle adapté à ta carte graphique.
 
-> Version bêta. Ce dépôt ne contient que les installateurs.
+> Version bêta. Ce dépôt contient le code source complet du plugin et des installateurs,
+> pour que chacun puisse l'auditer.
 
 ## Télécharger
 
-Va dans **[Releases](https://github.com/Capetlevrai/ia-locale/releases)** et prends le fichier
-de ton système.
+Le guide pas à pas est sur [capetlevrai.com](https://capetlevrai.com). Les installateurs sont aussi
+dans **[Releases](https://github.com/Capetlevrai/ia-locale/releases)** : prends le fichier de ton système.
 
 | Système | Fichier | Installation |
 |---|---|---|
@@ -39,6 +40,27 @@ complémentaires » puis « Exécuter quand même ».
 | macOS | Apple M1 et plus récents | expérimental, à tester |
 
 Détails, modèles proposés et dépannage : [LISEZMOI.txt](LISEZMOI.txt).
+
+## Code source
+
+Tout ce que l'installateur exécute est ici, en clair :
+
+| Chemin | Rôle |
+|---|---|
+| `install.ps1` | Installation Windows en 7 étapes (Paseo, carte graphique, mémoire, Oh My Pi, Node.js, plugin, moteur et modèle) |
+| `install.sh` | Même installation pour Linux et Mac |
+| `setup/Setup.cs` | Petit programme qui embarque `install.ps1` et le plugin dans `CapetLocal-Setup.exe` |
+| `setup/unix-header.sh`, `setup/install-helper.mjs` | En-tête et assistant de `CapetLocal-Setup.sh` |
+| `build-setup.ps1` | Construit `CapetLocal-Setup.exe` et `CapetLocal-Setup.sh` à partir de ces fichiers |
+| `capet-local/` | Le plugin Paseo : détection de la carte, téléchargement du moteur et des modèles, réglages, passerelle locale |
+| `capet-local/server/catalog.ts` | Liste des modèles, d'où ils sont téléchargés et la VRAM qu'ils demandent |
+
+L'installateur ne télécharge que depuis les sources officielles : Paseo (paseo.sh), llama.cpp
+(ggml-org sur GitHub), Bun (bun.sh) puis Oh My Pi (registre npm), Node.js (winget ou nodejs.org)
+et les modèles sur Hugging Face. Le moteur et la passerelle du plugin n'écoutent qu'en local
+(`127.0.0.1`).
+
+Pour reconstruire les installateurs sous Windows : `powershell -ExecutionPolicy Bypass -File .uild-setup.ps1`.
 
 ## Un souci ?
 

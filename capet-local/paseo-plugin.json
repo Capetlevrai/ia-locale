@@ -1,0 +1,9 @@
+{
+  "id": "capet-local",
+  "name": "IA locale (Capet Local)",
+  "description": "Fais tourner un agent de code sur ta carte graphique : moteur, modèles, accélération MTP/DFlash, contexte et outils MCP en quelques clics.",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.11.4"
+  }
+}
