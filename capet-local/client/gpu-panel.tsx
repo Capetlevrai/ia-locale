@@ -99,6 +99,39 @@ export function placePanelAboveUsage(): void {
   }
 }
 
+/** Paseo's saved choice of provider and model for the next new agent. */
+const CREATE_PREFERENCES_STORAGE = "@paseo:create-agent-preferences";
+/** The one model entry agents use (server/omp.ts, LOCAL_MODEL_ID). */
+const LOCAL_MODEL = "capet-local/local";
+const RELOADED_FLAG = "capet-local:model-choice-reloaded";
+
+/**
+ * Up to 0.3.2 each local model had its own id, and Paseo remembers the one picked last
+ * for the next new agent. Those ids are gone: a new workspace would show the raw id
+ * ("capet-local/swift15-27b-iq4") instead of the name of the loaded model. Point the
+ * saved choice at the one entry. Paseo holds its preferences in memory, so the window is
+ * reloaded once for the fix to show; at most once per session, and only when an old id
+ * was found. The phone app's storage is out of reach: there, pick the model once.
+ */
+export function forgetOldModelIds(): void {
+  try {
+    const host = globalThis as { localStorage?: KeyValueStore; sessionStorage?: KeyValueStore; location?: { reload(): void } };
+    const saved = host.localStorage?.getItem(CREATE_PREFERENCES_STORAGE);
+    if (!host.localStorage || !saved) return;
+    const preferences = JSON.parse(saved) as { providerPreferences?: Record<string, { model?: unknown } | undefined> };
+    const mine = preferences.providerPreferences?.["capet-local"];
+    if (!mine || typeof mine.model !== "string" || mine.model === LOCAL_MODEL) return;
+    mine.model = LOCAL_MODEL;
+    host.localStorage.setItem(CREATE_PREFERENCES_STORAGE, JSON.stringify(preferences));
+    if (host.sessionStorage && host.location && !host.sessionStorage.getItem(RELOADED_FLAG)) {
+      host.sessionStorage.setItem(RELOADED_FLAG, "1");
+      host.location.reload();
+    }
+  } catch {
+    // Not the preferences shape this was written for: leave them alone.
+  }
+}
+
 type Glyph = "play" | "stop" | "settings" | "loading";
 
 /** Filled play/stop shapes: crisper than outline icons at this size. */

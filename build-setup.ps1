@@ -10,7 +10,7 @@ $stage = Join-Path $env:TEMP "CapetLocal-build"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $payloadDir = Join-Path $stage "payload"
 New-Item -ItemType Directory -Force $payloadDir | Out-Null
-Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "Desinstaller.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt") $payloadDir
+Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "Desinstaller.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt"), (Join-Path $PSScriptRoot "setup\install-helper.mjs") $payloadDir
 robocopy (Join-Path $PSScriptRoot "capet-local") (Join-Path $payloadDir "capet-local") /E /XD node_modules tools /XF package-lock.json /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy $LASTEXITCODE" }
 $payload = Join-Path $stage "payload.zip"

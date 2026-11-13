@@ -10,7 +10,7 @@ $ErrorActionPreference = "Stop"
 $stage = Join-Path $env:TEMP "CapetLocal-beta"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory $stage | Out-Null
-Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "Desinstaller.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt") $stage
+Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "Desinstaller.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt"), (Join-Path $PSScriptRoot "setup\install-helper.mjs") $stage
 robocopy (Join-Path $PSScriptRoot "capet-local") (Join-Path $stage "capet-local") /E /XD node_modules tools /XF package-lock.json /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy $LASTEXITCODE" }
 if (Test-Path $Out) { Remove-Item -Force $Out }

@@ -356,6 +356,13 @@ if ($installed -match "(?m)^$PluginId\s" -and $sameFolder) {
 # Stop and start from here rather than restart: a service started before Bun and Node were
 # installed keeps its old PATH, and Oh My Pi's launcher then cannot find bun.exe.
 Native { & $paseo daemon stop } | Out-Null
+# Agents saved by older versions name a model id that no longer exists: point them at the one
+# entry of 0.3.3 (the service is stopped, so its files can be edited).
+$helper = Join-Path $PSScriptRoot "install-helper.mjs"
+if (Test-Path $helper) {
+  $migrated = (Native { & $bun $helper migrate-agents (Join-Path $env:USERPROFILE ".paseo") }).Trim()
+  if ($migrated) { Write-Host $migrated }
+}
 Native { & $paseo start --timeout 180 } | Out-Null
 $status = Wait-Gateway 180
 if (-not $status) { Fail "Le plugin ne répond pas après le redémarrage de Paseo. Relance l'installation ; si ça persiste, envoie le dossier $DataDir\logs." }

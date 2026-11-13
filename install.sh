@@ -339,6 +339,8 @@ else
 fi
 # Stop and start rather than restart: a service started before Bun was installed keeps its old PATH.
 "$PASEO" daemon stop >/dev/null 2>&1
+# Agents saved by older versions name a model id that no longer exists (service stopped: safe to edit).
+"$BUN" "$HELPER" migrate-agents "$HOME/.paseo" || true
 "$PASEO" start --timeout 180 >/dev/null 2>&1
 "$BUN" "$HELPER" wait-gateway 180 || fail "Le plugin ne répond pas après le redémarrage de Paseo. Relance l'installation ; si ça persiste, envoie le dossier $DATA_DIR/logs."
 ok "Plugin actif"

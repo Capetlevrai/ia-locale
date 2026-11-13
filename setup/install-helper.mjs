@@ -4,9 +4,10 @@
 //   wait-gateway <seconds>
 //   model <paseo-cli> <paseo-config.json> <plugin-settings.json>   (engine, model, agent)
 //   remove-provider <paseo-config.json>                            (uninstall)
+//   migrate-agents <paseo-home>                                    (run while the Paseo service is stopped)
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const GATEWAY = "http://127.0.0.1:8190";
 const PLUGIN_ID = "capet-local";
@@ -156,6 +157,48 @@ async function modelStep(cli, config, settingsFile) {
   else warn("Agent « IA locale » ajouté ; il apparaîtra à l'ouverture de Paseo.");
 }
 
+/** The one model agents use since 0.3.3 (capet-local/server/omp.ts, LOCAL_MODEL_ID). */
+const LOCAL_MODEL = `${PLUGIN_ID}/local`;
+
+/**
+ * Agents created by older versions are saved with one model id per model
+ * (capet-local/swift15-27b-iq4…). Those ids are gone: their model picker would show the
+ * raw id, and a new workspace starts from the last agent's model, so it would show it too.
+ * Point them at the one entry. Paseo keeps agents in memory: only while its service is stopped.
+ */
+function migrateAgents(paseoHome) {
+  const root = join(paseoHome, "agents");
+  if (!existsSync(root)) return;
+  const backup = join(paseoHome, `agents-avant-ia-locale-0.3.4`);
+  let changed = 0;
+  for (const project of readdirSync(root, { withFileTypes: true })) {
+    if (!project.isDirectory()) continue;
+    for (const name of readdirSync(join(root, project.name))) {
+      if (!name.endsWith(".json")) continue;
+      const file = join(root, project.name, name);
+      try {
+        const agent = readJson(file);
+        if (agent.provider !== PLUGIN_ID) continue;
+        let touched = false;
+        for (const holder of [agent.config, agent.runtimeInfo, agent.persistence?.metadata]) {
+          if (holder && typeof holder.model === "string" && holder.model !== LOCAL_MODEL) {
+            holder.model = LOCAL_MODEL;
+            touched = true;
+          }
+        }
+        if (!touched) continue;
+        mkdirSync(join(backup, project.name), { recursive: true });
+        copyFileSync(file, join(backup, project.name, name));
+        writeFileSync(file, JSON.stringify(agent, null, 2));
+        changed++;
+      } catch {
+        // Not an agent record we understand: leave it alone.
+      }
+    }
+  }
+  if (changed > 0) ok(`${changed} agent(s) IA locale mis à jour pour le nouveau sélecteur de modèle`);
+}
+
 const [command, ...args] = process.argv.slice(2);
 switch (command) {
   case "enable-plugins":
@@ -163,6 +206,9 @@ switch (command) {
     break;
   case "wait-gateway":
     process.exit((await waitGateway(Number(args[0] ?? 180))) ? 0 : 1);
+    break;
+  case "migrate-agents":
+    migrateAgents(args[0]);
     break;
   case "remove-provider": {
     const json = readJson(args[0]);
