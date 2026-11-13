@@ -340,6 +340,7 @@ export default function contribute(server: PluginServerContext) {
       reasoningBudget,
       engineKey: engine.engineKey,
       vision: () => engine.engineStatus().vision,
+      efforts: () => engine.currentPlan()?.model.reasoningEfforts ?? null,
       sampling: () => {
         const p = engine.currentPlan();
         if (!p) return null;

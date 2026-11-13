@@ -24,6 +24,8 @@ export interface GatewayHooks {
   vision(): boolean;
   /** Sampling for the loaded model, or null before it loads. */
   sampling(): Record<string, number> | null;
+  /** Reasoning levels the loaded model's chat template accepts, or null when it takes none. */
+  efforts(): string[] | null;
   /** Key the engine demands on its own port, so nothing but the gateway can use it. */
   engineKey(): string;
   /** Local control API under /capet/ for scripted tests (127.0.0.1 only). */
@@ -214,6 +216,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
       // An agent keeps the sampling of the model it was opened with (OMP sends it on every
       // request): after a model switch, Qwen3.6 would run at Swift's temperature 1.0.
       if (Array.isArray(json.messages)) Object.assign(json, hooks.sampling());
+      if (Array.isArray(json.messages)) fitReasoningEffort(json, hooks.efforts());
       if (Array.isArray(json.messages)) await capReasoning(json, hooks);
       isCompletion = Array.isArray(json.messages);
       // Running timings on every streamed chunk: feeds the live tok/s counter.
@@ -320,6 +323,27 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 }
 
 type Message = { role?: string; content?: unknown };
+
+/**
+ * An agent keeps the reasoning level it was opened with, and each model family has its own
+ * levels: an agent opened on Qwen3.6 sends "minimal", which Swift's chat template refuses
+ * (« Unexpected reasoning effort minimal »: a 500 on every call, the agent retries forever).
+ * Bring the level the agent sends to the nearest one the loaded model accepts.
+ */
+function fitReasoningEffort(json: Record<string, unknown>, allowed: string[] | null): void {
+  if (!allowed || allowed.length === 0) return;
+  const order = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+  const nearest = (effort: string): string => {
+    if (allowed.includes(effort)) return effort;
+    const rank = order.indexOf(effort);
+    // Unknown word ("auto"…): the middle level.
+    if (rank < 0) return allowed.includes("medium") ? "medium" : allowed[0];
+    return [...allowed].sort((a, b) => Math.abs(order.indexOf(a) - rank) - Math.abs(order.indexOf(b) - rank))[0];
+  };
+  const kwargs = json.chat_template_kwargs as { reasoning_effort?: unknown } | undefined;
+  if (kwargs && typeof kwargs.reasoning_effort === "string") kwargs.reasoning_effort = nearest(kwargs.reasoning_effort);
+  if (typeof json.reasoning_effort === "string") json.reasoning_effort = nearest(json.reasoning_effort);
+}
 
 /** Reasoning budget is enforced by llama.cpp per request; the message lets the model close its thinking cleanly. */
 async function capReasoning(json: Record<string, unknown>, hooks: GatewayHooks): Promise<void> {
