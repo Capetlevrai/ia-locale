@@ -238,6 +238,19 @@ export default function contribute(server: PluginServerContext) {
     return next.model.id;
   }
 
+  /**
+   * A model just finished downloading: add it to the list agents choose from, without
+   * waiting for the next Apply. Nothing to do before a first model was ever set up.
+   */
+  async function offerNewModel(): Promise<void> {
+    try {
+      const p = engine.currentPlan() ?? (await plan());
+      await syncAgentConfig(p, true);
+    } catch {
+      // No model chosen or engine not installed yet: Apply will write the list.
+    }
+  }
+
   /** The "IA locale" entry of Paseo's agents.providers (also written by install.ps1). */
   async function providerEntry(): Promise<Record<string, unknown>> {
     const ompInfo = await omp();
@@ -285,7 +298,12 @@ export default function contribute(server: PluginServerContext) {
       const model = findModel(modelId ?? null);
       if (!model) throw new Error(`Modèle inconnu : ${modelId}`);
       const files = part === "dflash" ? (model.dflash ? [model.dflash] : []) : [model.main, ...(model.mmproj ? [model.mmproj] : [])];
-      void startJob(`${part}:${model.id}`, model.label, files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size })));
+      void startJob(
+        `${part}:${model.id}`,
+        model.label,
+        files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 })),
+        offerNewModel,
+      );
       return { started: true, files: files.map((f) => f.localName) };
     }
     if (method === "POST" && path === "install-runtime") {
@@ -484,7 +502,8 @@ export default function contribute(server: PluginServerContext) {
     void startJob(
       `${part}:${modelId}`,
       part === "dflash" ? `DFlash ${model.label}` : model.label,
-      files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size })),
+      files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 })),
+      offerNewModel,
     );
     return { ok: true };
   });
