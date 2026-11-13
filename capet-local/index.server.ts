@@ -1,9 +1,10 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   applyRpc,
   cancelDownloadRpc,
+  deleteModelRpc,
   downloadModelRpc,
   installRuntimeRpc,
   statsRpc,
@@ -15,7 +16,7 @@ import {
 } from "./shared/rpc";
 import { localSettings, LocalSettingsSchema, type LocalSettings } from "./shared/settings";
 import { findModel, MCPS, MODELS, OMP_BASE_TOKENS, RUNTIME, type CatalogModel, type RuntimeVariant } from "./server/catalog";
-import { cancelJob, hfUrl, jobProgress, startJob } from "./server/download";
+import { cancelJob, diskFree, diskSpaceProblem, hfUrl, isRunning, jobProgress, startJob } from "./server/download";
 import * as engine from "./server/engine";
 import { callsInFlight, gatewayError, recentCalls, startGateway, stopGateway } from "./server/gateway";
 import * as stats from "./server/stats";
@@ -94,6 +95,21 @@ export default function contribute(server: PluginServerContext) {
 
   function modelInstalled(model: CatalogModel): boolean {
     return existsSync(engine.modelPath(model.main.localName)) && (!model.mmproj || existsSync(engine.modelPath(model.mmproj.localName)));
+  }
+
+  /**
+   * Files that go when `model` is deleted: its weights (two catalog entries can be the same
+   * file with other settings: both go), its DFlash draft, and its vision projector unless
+   * another downloaded model reads images with it.
+   */
+  function filesToDelete(model: CatalogModel): string[] {
+    const names = [model.main.localName, ...(model.dflash ? [model.dflash.localName] : [])];
+    const projector = model.mmproj?.localName;
+    const stillNeeded =
+      !!projector &&
+      MODELS.some((other) => other.main.localName !== model.main.localName && other.mmproj?.localName === projector && existsSync(engine.modelPath(other.main.localName)));
+    if (projector && !stillNeeded) names.push(projector);
+    return names.flatMap((name) => [engine.modelPath(name), `${engine.modelPath(name)}.part`]).filter((file) => existsSync(file));
   }
 
   function enabledMcps(values: LocalSettings) {
@@ -480,6 +496,7 @@ export default function contribute(server: PluginServerContext) {
           dflashDownload: jobProgress(`dflash:${m.id}`),
           minBudgetMiB: engine.minBudgetMiB(m, vision(m), dflash && !!m.dflash),
           comfortBudgetGb: comfortBudgetGb(m),
+          freesBytes: filesToDelete(m).reduce((sum, file) => sum + statSync(file).size, 0),
         };
       }),
       mcp: MCPS.map((m) => ({
@@ -500,6 +517,7 @@ export default function contribute(server: PluginServerContext) {
       update: await latestRelease(),
       agentBaseTokens: OMP_BASE_TOKENS,
       dataDir: paths.base,
+      diskFreeBytes: diskFree(paths.models),
     };
   }
 
@@ -513,12 +531,37 @@ export default function contribute(server: PluginServerContext) {
     if (!model) return { ok: false, message: "Modèle inconnu" };
     const files = part === "dflash" ? (model.dflash ? [model.dflash] : []) : [model.main, ...(model.mmproj ? [model.mmproj] : [])];
     if (files.length === 0) return { ok: false, message: "Rien à télécharger" };
-    void startJob(
-      `${part}:${modelId}`,
-      part === "dflash" ? `DFlash ${model.label}` : model.label,
-      files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 })),
-    );
+    const wanted = files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 }));
+    // Said now, in plain words, rather than a download that « starts » and fails at once.
+    const problem = diskSpaceProblem(wanted);
+    if (problem) return { ok: false, message: problem };
+    void startJob(`${part}:${modelId}`, part === "dflash" ? `DFlash ${model.label}` : model.label, wanted);
     return { ok: true };
+  });
+
+  server.handle(deleteModelRpc, async ({ modelId }) => {
+    const model = findModel(modelId);
+    if (!model) return { ok: false, message: "Modèle inconnu" };
+    const { values } = await readSettings();
+    const chosen = findModel(values.modelId);
+    // Same weights file as the chosen or loaded model (an entry with other settings): in use.
+    const sameFile = (other: CatalogModel | null | undefined) => !!other && other.main.localName === model.main.localName;
+    if (sameFile(chosen)) return { ok: false, message: `${model.label} est le modèle choisi : choisis-en un autre avant de le supprimer.` };
+    if (engine.engineStatus().state !== "stopped" && sameFile(engine.currentPlan()?.model)) {
+      return { ok: false, message: `${model.label} est chargé sur la carte : arrête-le ou charge un autre modèle d'abord.` };
+    }
+    if (isRunning(`model:${model.id}`)) return { ok: false, message: "Téléchargement en cours : annule-le d'abord." };
+    let freed = 0;
+    try {
+      for (const file of filesToDelete(model)) {
+        const size = statSync(file).size;
+        rmSync(file);
+        freed += size;
+      }
+    } catch (error) {
+      return { ok: false, message: `Suppression impossible : ${error instanceof Error ? error.message : String(error)}` };
+    }
+    return { ok: true, message: `${model.label} supprimé : ${(freed / 1024 ** 3).toFixed(1).replace(".", ",")} Go libérés. Tu peux le retélécharger quand tu veux.` };
   });
 
   server.handle(cancelDownloadRpc, ({ modelId }) => {

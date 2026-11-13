@@ -14,6 +14,7 @@ import { ScrollView, Text, View } from "react-native";
 import {
   applyRpc,
   cancelDownloadRpc,
+  deleteModelRpc,
   downloadModelRpc,
   installRuntimeRpc,
   statsRpc,
@@ -58,6 +59,9 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
   const installRuntime = useMutation({ mutationFn: useRpc(installRuntimeRpc) });
   const apply = useMutation({ mutationFn: useRpc(applyRpc) });
   const stop = useMutation({ mutationFn: useRpc(stopRpc) });
+  const deleteModel = useRpc(deleteModelRpc);
+  // Model whose « Supprimer » was pressed once: the second press deletes.
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const toast = useToast();
 
   const styles = useMemo(
@@ -189,7 +193,13 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
                 hint={hint}
                 actionLabel={running ? "Annuler" : "Télécharger"}
                 disabled={m.tier === "too_big" && !running}
-                onPress={() => (running ? cancel.mutate({ modelId: m.id }) : download.mutate({ modelId: m.id, part: "model" }))}
+                onPress={() => {
+                  if (running) return cancel.mutate({ modelId: m.id });
+                  // Refused before it starts when the disk is too full: say why.
+                  void download.mutateAsync({ modelId: m.id, part: "model" }).then((result) => {
+                    if (!result.ok && result.message) toast.error(result.message);
+                  });
+                }}
               />
             );
           }
@@ -209,6 +219,45 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
             />
           );
         })}
+        {(() => {
+          // Downloaded models that are neither the chosen one nor on the card.
+          const removable = s.models.filter(
+            (m) => m.installed && m.freesBytes > 0 && m.id !== values.modelId && !(s.engine.state !== "stopped" && s.engine.modelId === m.id),
+          );
+          if (removable.length === 0 && s.diskFreeBytes === null) return null;
+          return (
+            <>
+              <Text style={styles.muted}>
+                Faire de la place
+                {s.diskFreeBytes !== null ? ` — il reste ${gb(s.diskFreeBytes)} sur le disque des modèles` : ""}.{" "}
+                {removable.length > 0
+                  ? "Supprime un modèle dont tu ne te sers plus : tu pourras le retélécharger."
+                  : "Pour supprimer un modèle, choisis-en d'abord un autre."}
+              </Text>
+              {removable.map((m) => (
+                <SettingsAction
+                  key={`delete-${m.id}`}
+                  label={`Supprimer ${m.label}`}
+                  hint={confirmDelete === m.id ? "Clique encore une fois pour confirmer la suppression." : `Libère ${gb(m.freesBytes)} sur le disque.`}
+                  actionLabel={confirmDelete === m.id ? "Confirmer" : "Supprimer"}
+                  onPress={() => {
+                    if (confirmDelete !== m.id) {
+                      setConfirmDelete(m.id);
+                      // An accidental first click must not stay armed.
+                      setTimeout(() => setConfirmDelete((current) => (current === m.id ? null : current)), 6000);
+                      return;
+                    }
+                    setConfirmDelete(null);
+                    void deleteModel({ modelId: m.id })
+                      .then((result) => (result.ok ? toast.show(result.message, { variant: "success", durationMs: 6000 }) : toast.error(result.message)))
+                      .catch((error) => toast.error(error instanceof Error ? error.message : String(error)))
+                      .finally(() => void status.refetch());
+                  }}
+                />
+              ))}
+            </>
+          );
+        })()}
       </SettingsSection>
 
       {selected && (

@@ -53,6 +53,8 @@ export interface ModelStatus {
    * its bare minimum when the card can't do better, null when it does not fit at all.
    */
   comfortBudgetGb: number | null;
+  /** Disk space deleting this model gives back (a projector shared with another model stays). */
+  freesBytes: number;
   dflashInstalled: boolean;
   dflashDownload: Progress | null;
 }
@@ -110,6 +112,8 @@ export interface Status {
   /** Tokens an OMP session costs before the first message, without MCPs. */
   agentBaseTokens: number;
   dataDir: string;
+  /** Free space on the disk that holds the models, null when unknown. */
+  diskFreeBytes: number | null;
 }
 
 /** One agent turn: from the prompt being sent to the final answer. */
@@ -166,6 +170,13 @@ export const cancelDownloadRpc = defineRpc({
   name: "local.cancel-download",
   input: z.object({ modelId: z.string() }),
   output: z.object({ ok: z.boolean() }),
+});
+
+/** Delete a downloaded model's files to free disk space. It can be downloaded again. */
+export const deleteModelRpc = defineRpc({
+  name: "local.delete-model",
+  input: z.object({ modelId: z.string() }),
+  output: z.object({ ok: z.boolean(), message: z.string() }),
 });
 
 export const installRuntimeRpc = defineRpc({

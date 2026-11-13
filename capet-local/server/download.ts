@@ -38,28 +38,45 @@ export function isRunning(key: string): boolean {
 /** Kept free on the disk after a download: the system and the engine need room to breathe. */
 const DISK_MARGIN = 2 * 1024 ** 3;
 
-/** Refuse a download the disk cannot hold, rather than fail 15 GB later. */
-function checkDiskSpace(files: DownloadFile[]): void {
-  const first = files[0];
-  if (!first) return;
+/** Free bytes on the disk that holds `dir`, or null when it can't be read. */
+export function diskFree(dir: string): number | null {
+  try {
+    const fs = statfsSync(dir);
+    return Number(fs.bavail) * Number(fs.bsize);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why the disk cannot hold these files (not yet downloaded ones), in words the user can
+ * act on, or null when there is room. Checked before a download starts, rather than
+ * failing 15 GB later.
+ */
+export function diskSpaceProblem(files: DownloadFile[]): string | null {
+  const first = files.find((f) => !existsSync(f.dest));
+  if (!first) return null;
   let needed = 0;
   for (const file of files) {
+    if (existsSync(file.dest)) continue;
     const part = `${file.dest}.part`;
     needed += Math.max(0, (file.size ?? 0) - (existsSync(part) ? statSync(part).size : 0));
   }
-  let free: number;
-  try {
-    const fs = statfsSync(dirname(first.dest));
-    free = Number(fs.bavail) * Number(fs.bsize);
-  } catch {
-    return; // Unknown: let the download try.
-  }
-  if (needed + DISK_MARGIN > free) {
-    const go = (bytes: number) => (bytes / 1024 ** 3).toFixed(1).replace(".", ",");
-    throw new Error(
-      `Pas assez de place sur le disque : il faut ${go(needed + DISK_MARGIN)} Go libres, il en reste ${go(free)} dans ${dirname(first.dest)}.`,
-    );
-  }
+  const free = diskFree(dirname(first.dest));
+  if (free === null) return null; // Unknown: let the download try.
+  if (needed + DISK_MARGIN <= free) return null;
+  const go = (bytes: number) => (bytes / 1024 ** 3).toFixed(1).replace(".", ",");
+  // "C:" on Windows, the folder elsewhere.
+  const disk = /^[A-Za-z]:/.test(first.dest) ? first.dest.slice(0, 2) : dirname(first.dest);
+  return (
+    `Pas assez de place sur le disque ${disk} : ce téléchargement demande ${go(needed + DISK_MARGIN)} Go libres, il en reste ${go(free)}. ` +
+    "Supprime un modèle dont tu ne te sers plus (page IA locale, « Faire de la place ») ou libère de l'espace sur ce disque, puis relance."
+  );
+}
+
+function checkDiskSpace(files: DownloadFile[]): void {
+  const problem = diskSpaceProblem(files);
+  if (problem) throw new Error(problem);
 }
 
 /**

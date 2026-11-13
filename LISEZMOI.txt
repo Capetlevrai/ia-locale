@@ -76,6 +76,10 @@ Bon à savoir
   C'est le seul endroit où on le choisit. Le sélecteur de modèle de chaque agent (sous la
   zone de texte) affiche le nom du modèle chargé, et les agents ouverts prennent tout
   seuls ses réglages (taille du contexte, niveaux d'effort) en gardant leur conversation.
+- Plus de place sur le disque ? Page IA locale, section Modèle, « Faire de la place » :
+  supprime un modèle dont tu ne te sers plus (deux clics), tu pourras le retélécharger.
+  Avant un téléchargement, l'IA locale vérifie qu'il y a la place et te le dit sinon.
+- En mode « Budget VRAM », le budget s'ajuste tout seul quand tu choisis un modèle plus gros.
 - Un seul modèle tourne à la fois sur la carte : deux agents locaux se passent la main,
   l'un attend que l'autre ait fini sa réponse.
 - Les niveaux d'effort (Low, Medium, xHigh) existent pour Swift 1.5, pas pour Qwen3.6.
