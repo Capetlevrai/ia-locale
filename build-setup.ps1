@@ -10,17 +10,23 @@ $stage = Join-Path $env:TEMP "CapetLocal-build"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 $payloadDir = Join-Path $stage "payload"
 New-Item -ItemType Directory -Force $payloadDir | Out-Null
-Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt") $payloadDir
+Copy-Item (Join-Path $PSScriptRoot "install.ps1"), (Join-Path $PSScriptRoot "uninstall.ps1"), (Join-Path $PSScriptRoot "Installer.cmd"), (Join-Path $PSScriptRoot "Desinstaller.cmd"), (Join-Path $PSScriptRoot "LISEZMOI.txt") $payloadDir
 robocopy (Join-Path $PSScriptRoot "capet-local") (Join-Path $payloadDir "capet-local") /E /XD node_modules tools /XF package-lock.json /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy $LASTEXITCODE" }
 $payload = Join-Path $stage "payload.zip"
 Compress-Archive -Path (Join-Path $payloadDir "*") -DestinationPath $payload
 
+# One version everywhere: the plugin's shared/version.ts names it, Setup.exe carries it.
+$version = [regex]::Match((Get-Content -Raw (Join-Path $PSScriptRoot "capet-local\shared\version.ts")), 'VERSION = "(\d+\.\d+\.\d+)').Groups[1].Value
+if (-not $version) { throw "Version introuvable dans capet-local\shared\version.ts" }
+$versionCs = Join-Path $stage "Version.cs"
+[IO.File]::WriteAllText($versionCs, "[assembly: System.Reflection.AssemblyVersion(`"$version.0`")]`n[assembly: System.Reflection.AssemblyFileVersion(`"$version.0`")]`n")
 $csc = Join-Path $env:WINDIR "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $exe = Join-Path $OutDir "CapetLocal-Setup.exe"
-& $csc /nologo /target:exe /optimize+ "/out:$exe" "/resource:$payload,payload.zip" /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $PSScriptRoot "setup\Setup.cs")
+& $csc /nologo /target:exe /optimize+ "/out:$exe" "/resource:$payload,payload.zip" /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll (Join-Path $PSScriptRoot "setup\Setup.cs") $versionCs
 if ($LASTEXITCODE -ne 0) { throw "csc $LASTEXITCODE" }
 Copy-Item $payload (Join-Path $OutDir "CapetLocal-beta.zip") -Force
+"Version $version"
 "Installateur : $exe ($([math]::Round((Get-Item $exe).Length / 1KB)) Ko)"
 "Zip : $(Join-Path $OutDir 'CapetLocal-beta.zip')"
 
@@ -36,7 +42,8 @@ foreach ($script in (Join-Path $unixDir "install.sh"), (Join-Path $unixDir "setu
   if ([IO.File]::ReadAllText($script).Contains("`r")) { throw "$script a des fins de ligne Windows (CRLF) : bash ne le lirait pas" }
 }
 $tgz = Join-Path $stage "unix.tar.gz"
-& tar.exe -czf $tgz -C $unixDir .
+# Full path: with Git's Unix tools first in PATH, "tar.exe" is GNU tar, which reads "C:\..." as a remote host.
+& (Join-Path $env:WINDIR "System32\tar.exe") -czf $tgz -C $unixDir .
 if ($LASTEXITCODE -ne 0) { throw "tar $LASTEXITCODE" }
 $sh = Join-Path $OutDir "CapetLocal-Setup.sh"
 $header = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot "setup\unix-header.sh"))

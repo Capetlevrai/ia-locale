@@ -11,10 +11,11 @@ Ce qu'il faut
   570 ou plus sous Linux.
   Cartes AMD Radeon et Intel Arc (Windows), AMD (Linux) : prise en charge expérimentale
   (moteur Vulkan, plus lent que sur NVIDIA). Pilote à jour obligatoire.
-  Mac : prise en charge expérimentale (moteur Metal). La mémoire est partagée : il faut
-  24 Go de mémoire pour les modèles « 16 Go », 32 Go ou plus pour les modèles « 24 Go ».
+  Mac : prise en charge expérimentale (moteur Metal). La mémoire est partagée et macOS en
+  laisse environ les deux tiers à l'IA : il faut 24 Go de mémoire pour les modèles
+  « 16 Go », 36 Go ou plus pour les modèles « 24 Go » (32 Go : modèles « 16 Go » conseillés).
 - 16 Go de RAM minimum, 32 Go conseillés (surtout avec une carte de 10 à 12 Go)
-- 15 à 20 Go d'espace disque pour le modèle
+- 25 Go d'espace disque libre (le modèle pèse de 11 à 19 Go, plus le moteur et Paseo)
 
 Les modèles proposés
 --------------------
@@ -37,8 +38,10 @@ Installation
 2. Laisse-le travailler : environ 7 minutes avec la fibre, 20 minutes avec une connexion
    à 100 Mb/s (le modèle pèse de 11 à 19 Go). Il installe tout seul :
    Paseo, l'agent Oh My Pi, Node.js, le plugin, le moteur, puis télécharge et charge
-   le modèle conseillé pour ta carte. Les modèles vont sur le disque qui a le plus
-   de place si C: est presque plein.
+   le modèle conseillé pour ta carte. À la première installation, les modèles vont sur
+   le disque qui a le plus de place si C: est presque plein ; ensuite ils y restent.
+   Paseo est configuré avec l'accès depuis le téléphone (relais chiffré de Paseo) :
+   il se coupe dans Paseo > Paramètres.
    Si Windows demande une autorisation (« Voulez-vous autoriser… ? »), clique sur Oui :
    c'est pour installer Node.js ou agrandir la mémoire virtuelle. Reste devant l'écran
    pendant l'installation.
@@ -69,10 +72,32 @@ Bon à savoir
   VRAM utilisée. Choisis le modèle, puis Lancer (vert) ou Arrêter (rouge) pour
   libérer la carte avant de jouer.
 - Le modèle se décharge après 30 minutes sans utilisation pour libérer la carte.
+- Plusieurs modèles téléchargés ? Dans un agent, le sélecteur de modèle (sous la zone de
+  texte) les liste tous : choisis-en un autre, il se charge à ton prochain message (une
+  à deux minutes). Le modèle choisi dans IA locale est celui des nouveaux agents.
+- Un seul modèle tourne à la fois sur la carte : deux agents locaux se passent la main,
+  l'un attend que l'autre ait fini sa réponse.
+- Les niveaux d'effort (Low, Medium, xHigh) existent pour Swift 1.5, pas pour Qwen3.6.
+- L'IA locale n'écoute que ton ordinateur : les pages web ouvertes dans ton navigateur
+  ne peuvent ni l'utiliser ni la piloter.
+- Mises à jour : l'écran IA locale affiche la version installée et prévient quand un
+  nouvel installateur existe (une simple question à GitHub, rien n'est envoyé sur ton PC).
+  Relance le nouvel installateur : il met à jour sans retélécharger les modèles.
+
+Désinstaller
+------------
+- Windows : ouvre le dossier %LOCALAPPDATA%\CapetLocal et double-clique sur
+  Desinstaller.cmd. Il te demande si tu veux garder les modèles.
+- Mac et Linux : bash CapetLocal-Setup.sh --uninstall (ajoute --keep-models pour garder
+  les modèles).
+- Paseo, Bun et Node.js restent installés : ils servent à d'autres choses.
 
 En cas de souci
 ---------------
 - Relance l'installateur : chaque étape vérifie avant d'agir, sans risque.
 - Le journal du moteur est dans CapetLocal/logs/llama-server.log : envoie-le avec ta
   question. Dossier CapetLocal : %LOCALAPPDATA% sous Windows, ~/.local/share sous
-  Linux, ~/Library/Application Support sur Mac.
+  Linux, ~/Library/Application Support sur Mac. Si tes modèles sont sur un autre disque,
+  le chemin exact est écrit tout en bas de l'écran IA locale.
+- « Le port 8190 est déjà utilisé » : un autre programme occupe le port de l'IA locale.
+  Ferme-le ou redémarre le PC, l'IA locale réessaie toute seule.

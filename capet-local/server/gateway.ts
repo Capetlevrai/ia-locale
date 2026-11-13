@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { ENGINE_PORT, GATEWAY_PORT } from "./paths";
-import { callStarted, callTimings, type LlamaTimings } from "./stats";
+import { callStarted, callTimings, type CallHandle, type LlamaTimings } from "./stats";
 
 /**
  * Stable endpoint for agents. Starts the engine on the first request (so VRAM
@@ -8,8 +9,14 @@ import { callStarted, callTimings, type LlamaTimings } from "./stats";
  * template rejects, and records activity for idle unloading.
  */
 export interface GatewayHooks {
-  /** Make sure the engine is ready; returns the model id it serves. */
-  ensureEngine(): Promise<string>;
+  /**
+   * Make sure the engine is ready, on `requested` when that is a downloaded model, and
+   * return the model id it serves. `idle` tells when no call is in flight: a model swap
+   * waits for it.
+   */
+  ensureEngine(requested: string | null, idle: () => boolean): Promise<string>;
+  /** Model the engine serves right now, or null while it is stopped or loading. */
+  loadedModel(): string | null;
   onActivity(): void;
   /** Reasoning token cap for a request's effort level, or null for no cap. */
   reasoningBudget(effort: string | null): Promise<number | null>;
@@ -17,6 +24,8 @@ export interface GatewayHooks {
   vision(): boolean;
   /** Sampling for the loaded model, or null before it loads. */
   sampling(): Record<string, number> | null;
+  /** Key the engine demands on its own port, so nothing but the gateway can use it. */
+  engineKey(): string;
   /** Local control API under /capet/ for scripted tests (127.0.0.1 only). */
   admin(method: string, path: string, body: unknown): Promise<unknown>;
 }
@@ -25,8 +34,35 @@ export interface GatewayHooks {
 const JSON_TYPE = "application/json; charset=utf-8";
 
 let server: Server | null = null;
+/** Requests being served by the engine. */
+let inFlight = 0;
 
-export function startGateway(hooks: GatewayHooks): Promise<void> {
+/** Why the gateway is not listening (port taken by another program), or null. */
+let listenError: string | null = null;
+let retry: ReturnType<typeof setTimeout> | null = null;
+let stopped = false;
+
+export function gatewayError(): string | null {
+  return listenError;
+}
+
+/** Listen, and keep trying every 10 s while the port is taken: the UI shows why meanwhile. */
+export function startGateway(hooks: GatewayHooks): void {
+  stopped = false;
+  listen(hooks).then(
+    () => (listenError = null),
+    (error: NodeJS.ErrnoException) => {
+      listenError =
+        error.code === "EADDRINUSE"
+          ? `Le port ${GATEWAY_PORT} est déjà utilisé par un autre programme : l'agent IA locale ne peut pas démarrer. Ferme ce programme (ou redémarre le PC) ; l'IA locale réessaie toute seule.`
+          : `La passerelle de l'IA locale n'a pas démarré : ${error.message}`;
+      console.error(`[capet-local] gateway on :${GATEWAY_PORT} failed`, error);
+      if (!stopped) retry = setTimeout(() => startGateway(hooks), 10_000);
+    },
+  );
+}
+
+function listen(hooks: GatewayHooks): Promise<void> {
   if (server) return Promise.resolve();
   const srv = createServer((req, res) => {
     handle(req, res, hooks).catch((error: unknown) => {
@@ -46,11 +82,35 @@ export function startGateway(hooks: GatewayHooks): Promise<void> {
 }
 
 export function stopGateway(): void {
+  stopped = true;
+  if (retry) clearTimeout(retry);
   server?.close();
+  // Keep-alive connections from agents would hold the port through a plugin reload.
+  server?.closeAllConnections();
   server = null;
 }
 
+/**
+ * Only local programs (the agent, the installer) may talk to the gateway. A web page open
+ * in the user's browser can reach 127.0.0.1 too: without this check any site could stop
+ * the engine, start a 19 GB download or use the model. Browsers mark such requests with
+ * Origin or Sec-Fetch-Site, and a DNS-rebinding page arrives with its own Host.
+ */
+function fromBrowser(req: IncomingMessage): boolean {
+  if (req.headers.origin) return true;
+  const site = req.headers["sec-fetch-site"];
+  if (site && site !== "none" && site !== "same-origin") return true;
+  const host = (req.headers.host ?? "").toLowerCase();
+  return host !== `127.0.0.1:${GATEWAY_PORT}` && host !== `localhost:${GATEWAY_PORT}`;
+}
+
 async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayHooks): Promise<void> {
+  if (fromBrowser(req)) {
+    req.resume();
+    res.writeHead(403, { "content-type": JSON_TYPE });
+    res.end(JSON.stringify({ error: { message: "IA locale : accès réservé aux programmes de cet ordinateur." } }));
+    return;
+  }
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": JSON_TYPE });
     res.end('{"status":"ok"}');
@@ -73,13 +133,37 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
   }
 
   hooks.onActivity();
-  const modelId = await hooks.ensureEngine();
+  let json: Record<string, unknown> | null = null;
+  if (body.length > 0 && req.headers["content-type"]?.includes("json")) {
+    try {
+      json = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
+    } catch {
+      // Not JSON after all: forward untouched.
+    }
+  }
+  // The model the agent's picker is on. The engine holds one model: when the agent asks for
+  // another downloaded one, it is loaded in its place, once the calls in flight are done
+  // (they would be cut otherwise). Then hold the engine for this call.
+  const requested = json && Array.isArray(json.messages) && typeof json.model === "string" ? json.model : null;
+  let modelId: string;
+  for (;;) {
+    modelId = await hooks.ensureEngine(requested, () => inFlight === 0);
+    if (hooks.loadedModel() === modelId) break;
+  }
+  inFlight += 1;
+  let released = false;
+  const release = () => {
+    if (!released) {
+      released = true;
+      inFlight -= 1;
+    }
+  };
+  res.on("close", release);
 
   let payload = body;
   let isCompletion = false;
-  if (body.length > 0 && req.headers["content-type"]?.includes("json")) {
+  if (json) {
     try {
-      const json = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
       rewrite(json, modelId);
       if (!hooks.vision()) dropImages(json);
       // An agent keeps the sampling of the model it was opened with (OMP sends it on every
@@ -90,18 +174,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
       // Running timings on every streamed chunk: feeds the live tok/s counter.
       if (isCompletion && json.stream === true) json.timings_per_token = true;
       payload = Buffer.from(JSON.stringify(json));
-    } catch {
-      // Not JSON after all: forward untouched.
+    } catch (error) {
+      release();
+      throw error;
     }
   }
-  if (isCompletion) callStarted();
+  const call = isCompletion ? callStarted(conversationKey(payload)) : null;
 
-  const headers = { ...req.headers, host: `127.0.0.1:${ENGINE_PORT}`, "content-length": String(payload.length) };
+  const headers = {
+    ...req.headers,
+    host: `127.0.0.1:${ENGINE_PORT}`,
+    "content-length": String(payload.length),
+    authorization: `Bearer ${hooks.engineKey()}`,
+  };
   const upstream = httpRequest(
     { host: "127.0.0.1", port: ENGINE_PORT, method: req.method, path: req.url, headers },
     (upstreamRes) => {
       res.writeHead(upstreamRes.statusCode ?? 502, upstreamRes.headers);
-      const sniff = isCompletion ? timingsSniffer() : null;
+      const sniff = call ? timingsSniffer(call) : null;
       upstreamRes.on("data", (chunk: Buffer) => {
         hooks.onActivity();
         sniff?.push(chunk);
@@ -111,20 +201,37 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
     },
   );
   upstream.on("error", (error) => {
+    release();
     if (!res.headersSent) res.writeHead(502, { "content-type": JSON_TYPE });
     res.end(JSON.stringify({ error: { message: error.message } }));
   });
-  req.on("close", () => {
+  // The agent was interrupted: stop the engine's generation too. On the response, not the
+  // request: a request's "close" fires once its body is read, long before this point.
+  res.on("close", () => {
     if (!res.writableEnded) upstream.destroy();
   });
   upstream.end(payload);
 }
 
 /**
+ * Identifies a conversation across its model calls: the system prompt and first user
+ * message stay the same from one call to the next. Tells two agents' calls apart.
+ */
+function conversationKey(payload: Buffer): string | null {
+  try {
+    const { messages } = JSON.parse(payload.toString("utf8")) as { messages?: unknown[] };
+    if (!Array.isArray(messages) || messages.length === 0) return null;
+    return createHash("sha1").update(JSON.stringify(messages.slice(0, 2))).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Pull llama-server `timings` out of a response without altering it: SSE
  * chunks for streams (one data line per chunk), the whole JSON otherwise.
  */
-function timingsSniffer() {
+function timingsSniffer(call: CallHandle) {
   let pending = "";
   let streamed = false;
   const take = (text: string) => {
@@ -132,7 +239,7 @@ function timingsSniffer() {
     if (at < 0) return;
     try {
       const timings = (JSON.parse(text) as { timings?: LlamaTimings }).timings;
-      if (timings) callTimings(timings);
+      if (timings) callTimings(call, timings);
     } catch {
       // Partial or non-JSON line.
     }

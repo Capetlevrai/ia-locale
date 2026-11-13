@@ -9,7 +9,6 @@ using System.Text;
 
 [assembly: AssemblyTitle("Installation IA locale")]
 [assembly: AssemblyProduct("IA locale pour Paseo (Capet Local)")]
-[assembly: AssemblyVersion("0.1.0.0")]
 
 static class Setup
 {

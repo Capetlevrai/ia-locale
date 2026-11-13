@@ -12,7 +12,7 @@ export interface LlamaTimings {
   draft_n_accepted?: number;
 }
 
-interface Turn {
+export interface Turn {
   agentId: string;
   workspaceId: string | null;
   startedAt: number;
@@ -65,9 +65,30 @@ export function turnEnded(agentId: string, outcome: Exclude<TurnStats["outcome"]
   if (i >= 0) active.splice(i, 1);
 }
 
-function currentTurn(): Turn | null {
-  const agentId = active.at(-1);
-  return agentId ? (turns.get(agentId)?.current ?? null) : null;
+/** Conversation key (gateway.ts) -> the agent it was first seen with. */
+const conversations = new Map<string, string>();
+
+/**
+ * The turn a model call belongs to. The gateway only sees HTTP requests, so with several
+ * local agents at work each conversation is tied to an agent the first time it shows up:
+ * to the most recent agent that has no conversation yet. A single agent, or a call that
+ * can't be told apart (subagents, a compacted history), goes to the most recent agent.
+ */
+function turnFor(conversation: string | null): Turn | null {
+  const running = (agentId: string | undefined) => (agentId ? (turns.get(agentId)?.current ?? null) : null);
+  const known = conversation ? running(conversations.get(conversation)) : null;
+  if (known) return known;
+  if (conversation && active.length > 1) {
+    const claimed = new Set(conversations.values());
+    const free = [...active].reverse().find((agentId) => !claimed.has(agentId));
+    if (free) {
+      conversations.set(conversation, free);
+      return running(free);
+    }
+  }
+  const last = active.at(-1);
+  if (conversation && last && active.length === 1) conversations.set(conversation, last);
+  return running(last);
 }
 
 function flushLive(turn: Turn): void {
@@ -77,18 +98,26 @@ function flushLive(turn: Turn): void {
   turn.live = null;
 }
 
+/** A model call in flight, tied to the turn it was credited to. */
+export interface CallHandle {
+  turn: Turn | null;
+}
+
 /** A model call started at the gateway. */
-export function callStarted(): void {
-  const turn = currentTurn();
-  if (!turn) return;
-  flushLive(turn);
-  turn.calls += 1;
+export function callStarted(conversation: string | null): CallHandle {
+  const turn = turnFor(conversation);
+  if (turn) {
+    flushLive(turn);
+    turn.calls += 1;
+  }
+  return { turn };
 }
 
 /** Timings from a chunk (running totals for the call) or from a final response. */
-export function callTimings(timings: LlamaTimings): void {
-  const turn = currentTurn();
-  if (!turn) return;
+export function callTimings(call: CallHandle, timings: LlamaTimings): void {
+  const { turn } = call;
+  // A turn that ended meanwhile keeps the totals it had.
+  if (!turn || turn.endedAt !== null) return;
   if (turn.firstTokenAt === null && (timings.predicted_n ?? 0) > 0) turn.firstTokenAt = Date.now();
   turn.live = timings;
 }

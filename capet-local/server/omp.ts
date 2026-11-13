@@ -30,90 +30,112 @@ const COMPACTION_HEADROOM = 8192;
  * start a background LLM summary 8-32K tokens before that (which queues behind
  * the agent on llama.cpp's single slot), and summarize first. Locally: compact
  * late, drop old tool output first (no model call), summarize only if needed.
- * The trigger is a token count so small contexts still keep 8K of headroom.
  */
-function localCompaction(ctx: number, percent: number) {
-  const thresholdTokens = Math.max(Math.floor(ctx / 2), Math.min(Math.floor((ctx * percent) / 100), ctx - COMPACTION_HEADROOM));
+function compactionTokens(ctx: number, percent: number): number {
+  // A token count, so small contexts still keep 8K of headroom.
+  return Math.max(Math.floor(ctx / 2), Math.min(Math.floor((ctx * percent) / 100), ctx - COMPACTION_HEADROOM));
+}
+
+function localCompaction(contexts: number[], percent: number) {
+  const smallest = Math.min(...contexts);
+  // One trigger serves every model the agent can switch to. Same context everywhere: a
+  // token count. Otherwise a share of the window, the one that keeps the headroom on the
+  // smallest context (OMP applies it to whichever model the agent is on).
+  const same = contexts.every((ctx) => ctx === smallest);
+  const trigger = same
+    ? { thresholdTokens: compactionTokens(smallest, percent) }
+    : { thresholdPercent: Math.max(50, Math.floor((compactionTokens(smallest, percent) / smallest) * 100)) };
   return {
     enabled: true,
-    thresholdTokens,
+    ...trigger,
     methodOrder: ["shake", "soft"],
     asyncEnabled: false,
     midTurnEnabled: true,
-    keepRecentTokens: Math.min(20000, Math.floor(ctx / 4)),
+    keepRecentTokens: Math.min(20000, Math.floor(smallest / 4)),
     supersedeReads: true,
     dropUseless: true,
   };
 }
 
-/**
- * Write the isolated OMP agent dir: one local model, only the MCPs the user
- * ticked, and every cloud provider disabled so OMP never reaches out.
- */
-export function writeOmpConfig(
-  model: CatalogModel,
-  ctx: number,
-  mcps: CatalogMcp[],
-  compaction: { local: boolean; percent: number },
-  temperature: number,
-): void {
+export interface OmpModel {
+  model: CatalogModel;
+  /** Context the engine gives this model: measured once loaded, estimated before. */
+  ctx: number;
+  temperature: number;
+}
+
+function modelEntry({ model, ctx, temperature }: OmpModel) {
   const thinking = model.reasoningEfforts
     ? { mode: "effort", efforts: model.reasoningEfforts, defaultLevel: "medium" }
     : undefined;
+  return {
+    id: model.id,
+    name: model.label,
+    reasoning: true,
+    // Always: with vision off, OMP's own text-only path ends in an English error
+    // ("does not support image input"); the gateway swaps images for a note instead.
+    input: ["text", "image"],
+    // llama.cpp decodes images with stb (PNG/JPEG); WebP only works through ffprobe,
+    // missing on a fresh PC: browser screenshots then failed with "400 Failed to load
+    // image". "stb" makes OMP send PNG or JPEG instead of WebP.
+    imageInputDecoder: "stb",
+    contextWindow: ctx,
+    // Reasoning and the answer share this cap. 32K (a cloud default) cut a
+    // 20 KB file write in half after ~28K tokens of xhigh reasoning, and the
+    // agent had to redo it in pieces. Local tokens cost nothing: allow half
+    // the window (OMP still shrinks it to whatever space is left).
+    maxTokens: Math.min(65536, Math.floor(ctx / 2)),
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    compat: {
+      ...model.ompCompat,
+      extraBody: {
+        reasoning_budget_tokens: -1,
+        temperature,
+        top_p: model.sampling.topP,
+        top_k: model.sampling.topK,
+        min_p: model.sampling.minP,
+        presence_penalty: 0,
+        repeat_penalty: 1,
+      },
+    },
+    ...(thinking ? { thinking } : {}),
+  };
+}
 
+/**
+ * Write the isolated OMP agent dir: every downloaded local model (the agent's model
+ * picker in Paseo lists them, and the gateway loads the one an agent asks for), only
+ * the MCPs the user ticked, and every cloud provider disabled so OMP never reaches out.
+ * `defaultId` is the model a new agent starts on.
+ */
+export function writeOmpConfig(
+  entries: OmpModel[],
+  defaultId: string,
+  mcps: CatalogMcp[],
+  compaction: { local: boolean; percent: number },
+): void {
+  // The default first: lists and fallbacks start with it.
+  const ordered = [...entries].sort((a, b) => Number(b.model.id === defaultId) - Number(a.model.id === defaultId));
   const models = {
     providers: {
       [PROVIDER_ID]: {
         baseUrl: `http://127.0.0.1:${GATEWAY_PORT}/v1`,
         api: "openai-completions",
         auth: "none",
-        models: [
-          {
-            id: model.id,
-            name: model.label,
-            reasoning: true,
-            // Always: with vision off, OMP's own text-only path ends in an English error
-            // ("does not support image input"); the gateway swaps images for a note instead.
-            input: ["text", "image"],
-            // llama.cpp decodes images with stb (PNG/JPEG); WebP only works through ffprobe,
-            // missing on a fresh PC: browser screenshots then failed with "400 Failed to load
-            // image". "stb" makes OMP send PNG or JPEG instead of WebP.
-            imageInputDecoder: "stb",
-            contextWindow: ctx,
-            // Reasoning and the answer share this cap. 32K (a cloud default) cut a
-            // 20 KB file write in half after ~28K tokens of xhigh reasoning, and the
-            // agent had to redo it in pieces. Local tokens cost nothing: allow half
-            // the window (OMP still shrinks it to whatever space is left).
-            maxTokens: Math.min(65536, Math.floor(ctx / 2)),
-            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-            compat: {
-              ...model.ompCompat,
-              extraBody: {
-                reasoning_budget_tokens: -1,
-                temperature,
-                top_p: model.sampling.topP,
-                top_k: model.sampling.topK,
-                min_p: model.sampling.minP,
-                presence_penalty: 0,
-                repeat_penalty: 1,
-              },
-            },
-            ...(thinking ? { thinking } : {}),
-          },
-        ],
+        models: ordered.map(modelEntry),
       },
     },
   };
 
-  // Every role on the one loaded model: a subagent must never trigger a model swap.
+  // Every role on the agent's own model: a subagent must never trigger a model swap.
   const roles = ["smol", "slow", "plan", "commit", "tiny", "task", "advisor", "vision", "memory"];
   const config = {
-    modelRoles: Object.fromEntries(roles.map((role) => [role, "@default"])),
+    modelRoles: { default: `${PROVIDER_ID}/${defaultId}`, ...Object.fromEntries(roles.map((role) => [role, "@default"])) },
     enabledModels: [`${PROVIDER_ID}/*`],
     hideThinkingBlock: false,
     startup: { setupWizard: false, showSplash: false, quiet: true },
     mcp: { startupTimeoutMs: 0 },
-    ...(compaction.local ? { compaction: localCompaction(ctx, compaction.percent) } : {}),
+    ...(compaction.local ? { compaction: localCompaction(ordered.map((e) => e.ctx), compaction.percent) } : {}),
     disabledProviders: [
       "claude", "codex", "cursor", "gemini", "opencode", "windsurf", "cline", "vscode", "claude-plugins", "agent-plugins",
     ],

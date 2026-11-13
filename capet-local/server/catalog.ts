@@ -12,6 +12,8 @@ export interface HfFile {
   file: string;
   revision: string;
   size: number;
+  /** SHA-256 of the file (Hugging Face LFS oid): checked after download. */
+  sha256: string;
   /** Unique name under the models folder: HF file names collide across repos. */
   localName: string;
 }
@@ -112,11 +114,15 @@ const QWEN_SAMPLING = { temp: 1.0, topP: 0.95, topK: 20, minP: 0.0 };
 /** Qwen3.6 35B-A3B: Tetris bench 2026-10-17, temp 0.6 averaged 2.25/10 vs 0.25 at 1.0. */
 const QWEN36_SAMPLING = { temp: 0.6, topP: 0.95, topK: 20, minP: 0.0 };
 
+/** ByteShape's repo, pinned: a re-upload on `main` would no longer match the sizes and hashes below. */
+const BYTESHAPE_REVISION = "83dc80a65cb948b8e5a9dd9776eda7425180dacc";
+
 const SWIFT_MMPROJ: HfFile = {
   repo: "ukisai/Swift-1.5-Qwen3.8-27B-GGUF",
   file: "mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf",
   revision: "14bfe4b42be4a925d98816db830155f476c605e7",
   size: 927606912,
+  sha256: "10a24dc46eb801ad794886ef27ea1e43634d35388dfaf2e2374b7a8b67faf526",
   localName: "mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf",
 };
 
@@ -131,6 +137,7 @@ export const MODELS: CatalogModel[] = [
       file: "Swift-1.5-Qwen3.8-27B-IQ4_XS.gguf",
       revision: "14bfe4b42be4a925d98816db830155f476c605e7",
       size: 15475951296,
+      sha256: "e3b59faa312a6202d7ac0a2400123956104bc720e77f6ff21c754aec5c3740df",
       localName: "Swift-1.5-Qwen3.8-27B-IQ4_XS.gguf",
     },
     mmproj: SWIFT_MMPROJ,
@@ -152,6 +159,7 @@ export const MODELS: CatalogModel[] = [
       file: "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf",
       revision: "d74895bbe5db4bec1e0024e7cc87d59c02d7631a",
       size: 10442827776,
+      sha256: "e23eb251493b8a89f7d0217590b593e696ac9bacaeac8605541e477533dc5838",
       localName: "Swift-1.5-Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf",
     },
     mmproj: SWIFT_MMPROJ,
@@ -171,15 +179,17 @@ export const MODELS: CatalogModel[] = [
     main: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "Qwen3.6-35B-A3B-IQ4_XS-4.19bpw.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 18605304512,
+      sha256: "51eddce8a0cb63744edc677bff5f33834fb7cbab974124a6b4e43c54658a7b43",
       localName: "Qwen3.6-35B-A3B-IQ4_XS-4.19bpw.gguf",
     },
     mmproj: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "mmproj-bf16.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 902822240,
+      sha256: "1c625f05cd52e90abc76a5f756226c3a5fe279593379c22f6c6846c970a0cd18",
       localName: "Qwen3.6-35B-A3B-ByteShape-mmproj-bf16.gguf",
     },
     mtp: true,
@@ -199,15 +209,17 @@ export const MODELS: CatalogModel[] = [
     main: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "Qwen3.6-35B-A3B-IQ4_XS-3.53bpw.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 15669422784,
+      sha256: "3e4c1ccd0f4c7246614f28050a07b5d005bcf95d19813485f6c10666d8d70696",
       localName: "Qwen3.6-35B-A3B-IQ4_XS-3.53bpw.gguf",
     },
     mmproj: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "mmproj-bf16.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 902822240,
+      sha256: "1c625f05cd52e90abc76a5f756226c3a5fe279593379c22f6c6846c970a0cd18",
       localName: "Qwen3.6-35B-A3B-ByteShape-mmproj-bf16.gguf",
     },
     mtp: true,
@@ -227,15 +239,17 @@ export const MODELS: CatalogModel[] = [
     main: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "Qwen3.6-35B-A3B-IQ4_XS-3.53bpw.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 15669422784,
+      sha256: "3e4c1ccd0f4c7246614f28050a07b5d005bcf95d19813485f6c10666d8d70696",
       localName: "Qwen3.6-35B-A3B-IQ4_XS-3.53bpw.gguf",
     },
     mmproj: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "mmproj-bf16.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 902822240,
+      sha256: "1c625f05cd52e90abc76a5f756226c3a5fe279593379c22f6c6846c970a0cd18",
       localName: "Qwen3.6-35B-A3B-ByteShape-mmproj-bf16.gguf",
     },
     mtp: true,
@@ -261,6 +275,7 @@ export const MODELS: CatalogModel[] = [
       file: "RCO/Swift-1.5-Qwen3.8-27B-Uncensored-Dynamic-MTP-RCO-IQ3_XXS.gguf",
       revision: "540448475b2a84843fa2a54fcfd9c888de8a99ca",
       size: 10442827392,
+      sha256: "e13d3e7400b6c7f980ebd30c0edd6be43eb1865b50be8562a9db042706c7d803",
       localName: "Swift-1.5-Qwen3.8-27B-Uncensored-Dynamic-MTP-RCO-IQ3_XXS.gguf",
     },
     // Abliteration edits the language model only: Swift's own projector reads images for it.
@@ -283,14 +298,16 @@ export const MODELS: CatalogModel[] = [
       file: "Qwen3.6-35B-A3B-abliterated-v4-IQ3_M.gguf",
       revision: "b8a9ab20c8bde880621a7bab65073c0078ef33f7",
       size: 15440519328,
+      sha256: "70ab5f42ff0952deda29fc80f337bf4b3ffb3e0b906c0a1f718d84c9817595da",
       localName: "Qwen3.6-35B-A3B-abliterated-v4-IQ3_M.gguf",
     },
     // The repo ships no projector; the base model's (ByteShape) reads images for it.
     mmproj: {
       repo: "byteshape/Qwen3.6-35B-A3B-MTP-GGUF",
       file: "mmproj-bf16.gguf",
-      revision: "main",
+      revision: BYTESHAPE_REVISION,
       size: 902822240,
+      sha256: "1c625f05cd52e90abc76a5f756226c3a5fe279593379c22f6c6846c970a0cd18",
       localName: "Qwen3.6-35B-A3B-ByteShape-mmproj-bf16.gguf",
     },
     // Only the 69 GB BF16 file of this repo keeps the MTP head.
@@ -305,6 +322,7 @@ export const MODELS: CatalogModel[] = [
   },
 ];
 
+// Exact versions: `@latest` would run whatever was published last, untested, on every agent start.
 export const MCPS: CatalogMcp[] = [
   {
     id: "playwright",
@@ -314,7 +332,7 @@ export const MCPS: CatalogMcp[] = [
     enabledByDefault: false,
     requires: "npx",
     command: "npx",
-    args: ["-y", "@playwright/mcp@latest"],
+    args: ["-y", "@playwright/mcp@0.0.85"],
   },
   {
     id: "chrome-devtools",
@@ -326,7 +344,7 @@ export const MCPS: CatalogMcp[] = [
     command: "npx",
     // --isolated: own temporary profile. Without it the MCP refuses to start as soon
     // as another chrome-devtools session holds the shared profile (seen in agent tests).
-    args: ["-y", "chrome-devtools-mcp@latest", "--isolated"],
+    args: ["-y", "chrome-devtools-mcp@1.13.0", "--isolated"],
   },
   {
     id: "context7",
@@ -336,7 +354,7 @@ export const MCPS: CatalogMcp[] = [
     enabledByDefault: false,
     requires: "npx",
     command: "npx",
-    args: ["-y", "@upstash/context7-mcp@latest"],
+    args: ["-y", "@upstash/context7-mcp@4.7.0"],
   },
 ];
 

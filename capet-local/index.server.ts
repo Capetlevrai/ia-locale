@@ -1,5 +1,6 @@
 import type { PluginHandlerContext, PluginServerContext } from "@getpaseo/plugin/server";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   applyRpc,
   cancelDownloadRpc,
@@ -16,12 +17,14 @@ import { localSettings, LocalSettingsSchema, type LocalSettings } from "./shared
 import { findModel, MCPS, MODELS, OMP_BASE_TOKENS, RUNTIME, type CatalogModel, type RuntimeVariant } from "./server/catalog";
 import { cancelJob, hfUrl, jobProgress, startJob } from "./server/download";
 import * as engine from "./server/engine";
-import { startGateway, stopGateway } from "./server/gateway";
+import { gatewayError, startGateway, stopGateway } from "./server/gateway";
 import * as stats from "./server/stats";
 import { detectGpu, findOmp, hasNpx, ompVersion } from "./server/hardware";
-import { OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig } from "./server/omp";
+import { OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig, type OmpModel } from "./server/omp";
 import { GATEWAY_PORT, paths, PROVIDER_ID } from "./server/paths";
 import { findServerExe, installRuntime, runtimeDownload, runtimeLabel } from "./server/runtime";
+import { latestRelease } from "./server/update";
+import { VERSION } from "./shared/version";
 
 /** Paseo only provides zod and @getpaseo/plugin* to plugins, so the client type comes from the SDK. */
 type PaseoApi = PluginHandlerContext["paseo"];
@@ -97,10 +100,13 @@ export default function contribute(server: PluginServerContext) {
     return MCPS.filter((m) => values.mcp[m.id] ?? m.enabledByDefault);
   }
 
-  /** `overrides` lets the test API try other settings without touching the saved ones. */
-  async function plan(overrides: Partial<LocalSettings> = {}): Promise<engine.EnginePlan> {
+  /**
+   * `overrides` lets the test API try other settings without touching the saved ones.
+   * `modelId` is the model an agent asked for, when it is not the one saved in the settings.
+   */
+  async function plan(overrides: Partial<LocalSettings> = {}, modelId?: string): Promise<engine.EnginePlan> {
     const saved = await readSettings();
-    const values = { ...saved.values, ...overrides };
+    const values = { ...saved.values, ...overrides, ...(modelId ? { modelId } : {}) };
     const revision = Object.keys(overrides).length > 0 ? `${saved.revision}+test` : saved.revision;
     const model = findModel(values.modelId);
     if (!model) throw new Error("Aucun modèle choisi");
@@ -123,18 +129,81 @@ export default function contribute(server: PluginServerContext) {
     return next;
   }
 
-  /** Point OMP at the context llama.cpp ended up with, or an estimate before it loads. */
-  async function syncAgentConfig(p: engine.EnginePlan): Promise<void> {
+  /** Largest context announced for a model that was never loaded with the current settings. */
+  const ESTIMATE_MAX_CTX = 131072;
+
+  /** Context each model got the last time it was loaded with these settings (model|vision|accel|mode -> tokens). */
+  const contextsFile = join(paths.base, "contexts.json");
+  function readContexts(): Record<string, number> {
+    try {
+      return JSON.parse(readFileSync(contextsFile, "utf8")) as Record<string, number>;
+    } catch {
+      return {};
+    }
+  }
+  function contextKey(p: engine.EnginePlan): string {
+    return [p.model.id, engine.visionOnGpu(p) ? "vision" : "texte", p.speculative, p.ctx ?? "auto", p.budgetMiB ?? "libre"].join("|");
+  }
+
+  /**
+   * Context to announce for a model: measured if it is the loaded one, else what it got
+   * last time with these settings, else an estimate (never above what the card can hold:
+   * an agent that believes in more context than the engine has ends in an error).
+   */
+  function contextFor(p: engine.EnginePlan, card: GpuInfo | null): number {
+    const loaded = engine.currentPlan();
+    const live = engine.engineStatus();
+    if (loaded && loaded.model.id === p.model.id && live.state === "ready" && live.ctx) return live.ctx;
+    const remembered = readContexts()[contextKey(p)];
+    if (remembered) return remembered;
+    if (p.ctx !== null) return p.ctx;
+    const budgetMiB = p.budgetMiB ?? (card ? card.vramTotalMiB - 2048 : null);
+    const estimate = budgetMiB !== null ? engine.estimateCtx(p.model, budgetMiB, engine.visionOnGpu(p), p.speculative === "dflash") : 0;
+    // Capped: the estimate ignores what else uses the card, and no model here is trained
+    // beyond 262K. Announcing less than the engine gives only compacts a little early.
+    return Math.min(ESTIMATE_MAX_CTX, Math.max(engine.MIN_CTX, estimate || 32768));
+  }
+
+  /**
+   * Give OMP every downloaded model, each with the context the engine gives it: the model
+   * picker of an agent lists them all, and the gateway loads the one the agent is on.
+   * `p` is the plan just applied or loaded; its model is the one new agents start on
+   * unless `keepDefault` (a model an agent asked for must not become everyone's default).
+   */
+  async function syncAgentConfig(p: engine.EnginePlan, keepDefault = false): Promise<void> {
     const { values } = await readSettings();
-    const estimate = p.budgetMiB !== null ? engine.estimateCtx(p.model, p.budgetMiB, engine.visionOnGpu(p), p.speculative === "dflash") : null;
-    const ctx = engine.engineStatus().ctx ?? p.ctx ?? estimate ?? 32768;
-    writeOmpConfig(p.model, ctx, enabledMcps(values), {
-      local: values.localCompaction,
-      percent: values.compactPercent,
-    }, p.temperature);
+    const card = await gpu();
+    const live = engine.engineStatus();
+    if (live.state === "ready" && live.ctx && engine.currentPlan() === p) {
+      const all = readContexts();
+      if (all[contextKey(p)] !== live.ctx) {
+        all[contextKey(p)] = live.ctx;
+        try {
+          writeFileSync(contextsFile, JSON.stringify(all, null, 2));
+        } catch {
+          // Only spares an estimate next time.
+        }
+      }
+    }
+    const entries: OmpModel[] = [];
+    for (const model of MODELS.filter(modelInstalled)) {
+      const exe = p.exe;
+      const each = model.id === p.model.id ? p : engine.makePlan(model, exe, p.variant, values, p.revision);
+      // A model the VRAM budget cannot hold would only fail to load when picked: leave it
+      // out of the agents' model list (IA locale still shows it, with what it needs).
+      const tooBig =
+        each !== p &&
+        each.budgetMiB !== null &&
+        each.budgetMiB < engine.minBudgetMiB(model, engine.visionOnGpu(each), each.speculative === "dflash");
+      if (tooBig) continue;
+      entries.push({ model, ctx: contextFor(each, card), temperature: each.temperature });
+    }
+    const saved = findModel(values.modelId);
+    const defaultId = keepDefault && saved && modelInstalled(saved) ? saved.id : p.model.id;
+    writeOmpConfig(entries, defaultId, enabledMcps(values), { local: values.localCompaction, percent: values.compactPercent });
     // Paseo caches the provider's model list: re-probe when what OMP exposes changes,
     // or a new agent would ask OMP for a model that is gone.
-    const exposed = `${p.model.id}|${ctx}`;
+    const exposed = JSON.stringify([defaultId, entries.map((e) => [e.model.id, e.ctx])]);
     if (exposed !== advertised) {
       advertised = exposed;
       if (paseoClient) await refreshProvider(paseoClient);
@@ -142,12 +211,24 @@ export default function contribute(server: PluginServerContext) {
     }
   }
 
-  async function ensureEngine(): Promise<string> {
-    const plan_ = engine.currentPlan();
-    if (engine.isReady() && plan_) return plan_.model.id;
-    const next = await plan();
+  /**
+   * The engine ready on the model an agent asks for. `requested` is the id its model
+   * picker sends; anything else (an old agent's name, a model since deleted) gets the
+   * model already loaded, or the one chosen in IA locale.
+   */
+  async function ensureEngine(requested: string | null = null, idle: () => boolean = () => true): Promise<string> {
+    const asked = requested ? findModel(requested) : undefined;
+    const want = asked && modelInstalled(asked) ? asked.id : null;
+    const loaded = engine.currentPlan();
+    if (engine.isReady() && loaded && (!want || want === loaded.model.id)) return loaded.model.id;
+    // After an idle unload, come back on the model that was loaded, not the saved default.
+    const modelId = want ?? loaded?.model.id;
+    const next = await plan({}, modelId);
+    const swap = engine.isReady() && loaded && loaded.model.id !== next.model.id;
+    // Another agent is mid-answer on the loaded model: let it finish, a swap would cut it.
+    while (swap && !idle()) await new Promise((resolve) => setTimeout(resolve, 250));
     await engine.start(next);
-    await syncAgentConfig(next);
+    await syncAgentConfig(next, true);
     return next.model.id;
   }
 
@@ -236,9 +317,11 @@ export default function contribute(server: PluginServerContext) {
   void engine.killOrphan().then(() =>
     startGateway({
       ensureEngine,
+      loadedModel: () => (engine.isReady() ? (engine.currentPlan()?.model.id ?? null) : null),
       onActivity: () => (lastActivity = Date.now()),
       admin,
       reasoningBudget,
+      engineKey: engine.engineKey,
       vision: () => engine.engineStatus().vision,
       sampling: () => {
         const p = engine.currentPlan();
@@ -246,8 +329,6 @@ export default function contribute(server: PluginServerContext) {
         const { topP, topK, minP } = p.model.sampling;
         return { temperature: p.temperature, top_p: topP, top_k: topK, min_p: minP };
       },
-    }).catch((error: unknown) => {
-      console.error(`[capet-local] gateway on :${GATEWAY_PORT} failed`, error);
     }),
   );
 
@@ -266,7 +347,7 @@ export default function contribute(server: PluginServerContext) {
     if (request.config.provider !== PROVIDER_ID) return;
     // Load the model while OMP boots instead of on its first request.
     lastActivity = Date.now();
-    void ensureEngine().catch(() => {});
+    void ensureEngine(typeof request.config.model === "string" ? request.config.model : null).catch(() => {});
     const { values } = await readSettings();
     if (!values.paseoTools && request.config.mcpServers) {
       const { paseo: _dropped, ...rest } = request.config.mcpServers;
@@ -374,6 +455,9 @@ export default function contribute(server: PluginServerContext) {
       engine: engine.engineStatus(),
       budgetOptions,
       gatewayUrl: `http://127.0.0.1:${GATEWAY_PORT}/v1`,
+      gatewayError: gatewayError(),
+      version: VERSION,
+      update: await latestRelease(),
       agentBaseTokens: OMP_BASE_TOKENS,
       dataDir: paths.base,
     };
@@ -444,7 +528,12 @@ export default function contribute(server: PluginServerContext) {
       .then(() => syncAgentConfig(next))
       .then(() => refreshProvider(paseo))
       .catch(() => {});
-    return { ok: true, message: `Chargement de ${next.model.label}. ${vramPlanText(next, previousUsedMiB)}` };
+    return {
+      ok: true,
+      message:
+        `Chargement de ${next.model.label}. ${vramPlanText(next, previousUsedMiB)} ` +
+        "Les nouveaux agents démarrent sur ce modèle ; un agent déjà ouvert garde le sien, à changer dans son sélecteur de modèle, sous la zone de texte.",
+    };
   });
 
   server.handle(stopRpc, async () => {

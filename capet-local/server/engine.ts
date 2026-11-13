@@ -1,5 +1,6 @@
 import { execCommand, spawnProcess, terminateProcess } from "@getpaseo/plugin/server";
 import type { ChildProcess } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
@@ -31,6 +32,22 @@ const LOG_LINES = 40;
 let child: ChildProcess | null = null;
 let current: EnginePlan | null = null;
 let starting: Promise<void> | null = null;
+/** The plan `starting` is loading. */
+let startingPlan: EnginePlan | null = null;
+/** Bumped by each new start: a load that is no longer the latest gives up. */
+let generation = 0;
+
+/**
+ * llama-server listens on its own local port: without a key, any web page in the user's
+ * browser could use the model there, around the gateway's checks. New at each plugin start.
+ */
+const ENGINE_KEY = randomBytes(24).toString("hex");
+
+export function engineKey(): string {
+  return ENGINE_KEY;
+}
+
+class Superseded extends Error {}
 const status: EngineStatus = {
   state: "stopped",
   modelId: null,
@@ -227,7 +244,7 @@ async function waitHealthy(proc: ChildProcess, timeoutMs: number): Promise<void>
 
 async function readContext(): Promise<number | null> {
   try {
-    const res = await fetch(`http://127.0.0.1:${ENGINE_PORT}/props`);
+    const res = await fetch(`http://127.0.0.1:${ENGINE_PORT}/props`, { headers: { authorization: `Bearer ${ENGINE_KEY}` } });
     const props = (await res.json()) as { default_generation_settings?: { n_ctx?: number } };
     return props.default_generation_settings?.n_ctx ?? null;
   } catch {
@@ -329,11 +346,18 @@ async function launch(
   offload: boolean,
   pin: Pin,
   calibrationKey: string,
+  superseded: () => boolean,
 ): Promise<"ok" | "memory" | "error"> {
   const args = [...buildArgs(plan, marginMiB, offload), ...pin.args];
   const log = createWriteStream(join(paths.logs, "llama-server.log"), { flags: "w" });
+  // The key stays out of the log, which users send along with their questions.
   log.write(`"${plan.exe}" ${args.join(" ")}\n\n`);
-  const proc = spawnProcess(plan.exe, args, { cwd: dirname(plan.exe), stdio: "pipe", windowsHide: true, env: pin.env });
+  const proc = spawnProcess(plan.exe, [...args, "--api-key", ENGINE_KEY], {
+    cwd: dirname(plan.exe),
+    stdio: "pipe",
+    windowsHide: true,
+    env: pin.env,
+  });
   child = proc;
   writeFileSync(paths.state, JSON.stringify({ enginePid: proc.pid }));
   let memoryFailure = false;
@@ -353,6 +377,8 @@ async function launch(
     child = null;
     // Out of memory on a request: the calibrated margin was too tight for this PC.
     if (status.state === "ready" && memoryFailure && calibrationKey) saveCalibration(calibrationKey, 0);
+    // Cut short for another load: that one owns the status now, this is not an error.
+    if (superseded()) return;
     if (status.state !== "stopped") {
       status.state = "error";
       status.error = `llama-server s'est arrêté (code ${code}). Voir ${join(paths.logs, "llama-server.log")}`;
@@ -367,8 +393,10 @@ async function launch(
     status.state = "ready";
     return "ok";
   } catch (error) {
-    status.state = "error";
-    status.error = error instanceof Error ? error.message : String(error);
+    if (!superseded()) {
+      status.state = "error";
+      status.error = error instanceof Error ? error.message : String(error);
+    }
     if (child === proc) {
       child = null;
       if (proc.exitCode === null) await terminateProcess(proc);
@@ -377,9 +405,42 @@ async function launch(
   }
 }
 
+/** What makes two plans the same engine launch. */
+function planKey(plan: EnginePlan): string {
+  const { model, exe, variant, speculative, vision, visionOnCpu, ctx, budgetMiB, revision, temperature } = plan;
+  return JSON.stringify([model.id, exe, variant, speculative, vision, visionOnCpu, ctx, budgetMiB, revision, temperature]);
+}
+
+/**
+ * Load `plan`. Asked again for the plan already loading, joins that load. Asked for
+ * another one meanwhile (model changed while the first still loads), drops the first
+ * and loads the new one: the latest choice wins, never silently the older one.
+ */
 export function start(plan: EnginePlan): Promise<void> {
-  if (starting) return starting;
-  starting = (async () => {
+  if (starting && startingPlan && planKey(startingPlan) === planKey(plan)) return starting;
+  const previous = starting;
+  const mine = ++generation;
+  startingPlan = plan;
+  // Cut the load in progress short: its process exits and it sees it was superseded.
+  if (previous && child && child.exitCode === null) void terminateProcess(child);
+  const run = (previous ?? Promise.resolve())
+    .catch(() => {})
+    .then(() => load(plan, mine))
+    // Cleared before the callers resume: they read isReady() right after.
+    .finally(() => {
+      if (mine === generation) {
+        starting = null;
+        startingPlan = null;
+      }
+    });
+  starting = run;
+  return run;
+}
+
+function load(plan: EnginePlan, mine: number): Promise<void> {
+  const superseded = () => mine !== generation;
+  return (async () => {
+    if (superseded()) throw new Superseded("Chargement remplacé par un autre.");
     await stop();
     current = plan;
     Object.assign(status, {
@@ -432,7 +493,12 @@ export function start(plan: EnginePlan): Promise<void> {
       if (offload && !status.notice) {
         status.notice = "Une partie du modèle tourne sur le processeur pour garder 64K de contexte (modèle MoE : la vitesse reste bonne).";
       }
-      const outcome = await launch(plan, marginMiB, freeBefore, offload, pin, calibrate ? key : "");
+      if (superseded()) throw new Superseded("Chargement remplacé par un autre.");
+      const outcome = await launch(plan, marginMiB, freeBefore, offload, pin, calibrate ? key : "", superseded);
+      if (superseded()) {
+        // The next load resets the status and stops whatever this one left running.
+        throw new Superseded("Chargement remplacé par un autre.");
+      }
       if (outcome === "ok") {
         const leftover = calibrate && budgetMiB !== null && status.vramUsedMiB !== null ? budgetMiB - status.vramUsedMiB : 0;
         if (!recalibrated && leftover >= CALIBRATE_MIN_MIB && adjustMiB + leftover - CALIBRATE_KEEP_MIB <= CALIBRATE_MAX_MIB) {
@@ -476,10 +542,7 @@ export function start(plan: EnginePlan): Promise<void> {
       await stop(true);
       throw new Error(status.error ?? "Le moteur n'a pas démarré");
     }
-  })().finally(() => {
-    starting = null;
-  });
-  return starting;
+  })();
 }
 
 export async function stop(keepError = false): Promise<void> {
@@ -492,8 +555,9 @@ export async function stop(keepError = false): Promise<void> {
   if (proc && proc.exitCode === null) await terminateProcess(proc);
 }
 
+/** Loaded and not about to be replaced: a load in progress may still restart the engine. */
 export function isReady(): boolean {
-  return status.state === "ready" && child !== null;
+  return status.state === "ready" && child !== null && starting === null;
 }
 
 /**

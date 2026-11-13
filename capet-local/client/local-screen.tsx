@@ -25,6 +25,7 @@ import {
 } from "../shared/rpc";
 import { localSettings, type LocalSettings, type Speculative } from "../shared/settings";
 import { detailRows, latestTurn } from "../shared/format";
+import { openExternal } from "./web";
 
 const gb = (bytes: number) => `${(bytes / 1024 ** 3).toFixed(1)} Go`;
 const ktok = (tokens: number) => `${Math.round(tokens / 1000)} K`;
@@ -96,6 +97,8 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
 
   const lastTurn = stats.data ? latestTurn(stats.data.agents) : null;
   const selected = s.models.find((m) => m.id === values.modelId) ?? null;
+  // An agent can ask for another downloaded model than the one chosen here.
+  const loaded = s.models.find((m) => m.id === s.engine.modelId) ?? null;
   const mcpEnabled = (id: string, fallback: boolean) => values.mcp[id] ?? fallback;
   const mcpTokens = s.mcp.reduce((sum, m) => sum + (mcpEnabled(m.id, m.enabledByDefault) ? m.tokens : 0), 0);
   const startupTokens = s.agentBaseTokens + mcpTokens + (values.paseoTools ? 3000 : 0);
@@ -108,7 +111,7 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
   const engineLine = {
     stopped: { style: styles.muted, text: "Arrêté — il démarrera tout seul quand un agent IA locale parle." },
     starting: { style: styles.warn, text: "Chargement du modèle sur la carte graphique…" },
-    ready: { style: styles.ok, text: `Prêt — ${selected?.label ?? s.engine.modelId}` },
+    ready: { style: styles.ok, text: `Prêt — ${loaded?.label ?? s.engine.modelId}` },
     error: { style: styles.danger, text: s.engine.error ?? "Erreur" },
   }[s.engine.state];
 
@@ -120,6 +123,16 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
           Fais tourner un agent de code sur ta propre carte graphique. Suis les étapes de haut en bas.
         </Text>
       </View>
+
+      {s.gatewayError && <Text style={styles.danger}>{s.gatewayError}</Text>}
+      {s.update && (
+        <SettingsAction
+          label={`Nouvelle version ${s.update.version} disponible`}
+          hint={`Tu as la ${s.version}. Télécharge le nouvel installateur et lance-le : il met à jour l'IA locale sans toucher à tes modèles.`}
+          actionLabel="Télécharger"
+          onPress={() => void openExternal(s.update!.url)}
+        />
+      )}
 
       <SettingsSection title="1. Ta machine">
         <SettingsRow
@@ -156,6 +169,10 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
       </SettingsSection>
 
       <SettingsSection title="2. Modèle">
+        <Text style={styles.muted}>
+          Le modèle choisi ici est celui des nouveaux agents. Dans un agent, tu peux passer à un autre modèle téléchargé
+          avec le sélecteur de modèle, sous la zone de texte : il se charge à ton prochain message (une à deux minutes).
+        </Text>
         {s.models.map((m) => {
           const running = m.download?.state === "running";
           const active = values.modelId === m.id;
@@ -178,8 +195,9 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
             <SettingsAction
               key={m.id}
               label={active ? `✓ ${m.label}` : m.label}
-              hint={hint}
-              actionLabel={active ? "Choisi" : "Utiliser"}
+              hint={loaded?.id === m.id && s.engine.state === "ready" ? `${hint}
+● Chargé sur la carte` : hint}
+              actionLabel={active ? "Par défaut" : "Utiliser"}
               disabled={active}
               onPress={() => save({ modelId: m.id })}
             />
@@ -418,7 +436,9 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
         )}
       </SettingsSection>
 
-      <Text style={styles.muted}>Fichiers : {s.dataDir}</Text>
+      <Text style={styles.muted}>
+        IA locale {s.version} · Fichiers et journal (logs) : {s.dataDir}
+      </Text>
     </ScrollView>
   );
 }

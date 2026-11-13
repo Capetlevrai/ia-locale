@@ -94,6 +94,12 @@ export interface Status {
   /** Budget choices (whole GB) for the selected model, with the context each would give. */
   budgetOptions: { gb: number; estCtx: number }[];
   gatewayUrl: string;
+  /** Why agents cannot reach the engine (port taken by another program), or null. */
+  gatewayError: string | null;
+  /** Version of this plugin. */
+  version: string;
+  /** A newer installer exists. */
+  update: { version: string; url: string } | null;
   /** Tokens an OMP session costs before the first message, without MCPs. */
   agentBaseTokens: number;
   dataDir: string;

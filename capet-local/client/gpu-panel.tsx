@@ -199,6 +199,8 @@ export function GpuPanel({ theme, openScreen, openPopover }: PluginSidebarItemPr
   const ready = !!s.gpu && s.runtime.installed && s.omp.installed && !!selected?.installed;
   const state = s.engine.state;
   const running = state === "ready" || state === "starting";
+  // What the card holds: an agent's model picker can load another model than the default.
+  const shown = (running ? s.models.find((m) => m.id === s.engine.modelId) : null) ?? selected;
   const openLocal = () => openScreen({ screenId: "local" });
 
   const run = async (action: () => Promise<{ ok: boolean; message?: string }>) => {
@@ -245,7 +247,7 @@ export function GpuPanel({ theme, openScreen, openPopover }: PluginSidebarItemPr
     <View style={{ gap: 4, paddingBottom: 4 }}>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={`Modèle IA locale : ${selected?.label ?? "aucun"}. Changer de modèle`}
+        accessibilityLabel={`Modèle IA locale : ${shown?.label ?? "aucun"}. Changer de modèle`}
         onPress={() => openPopover(ModelPicker)}
         style={(st) => ({
           minHeight: 28,
@@ -259,7 +261,7 @@ export function GpuPanel({ theme, openScreen, openPopover }: PluginSidebarItemPr
       >
         <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: dotColor(state, c) }} />
         <Text numberOfLines={1} style={{ flex: 1, minWidth: 0, color: c.foreground, fontSize: 13 }}>
-          {selected?.label ?? "Choisir un modèle"}
+          {shown?.label ?? "Choisir un modèle"}
         </Text>
         <Icon name="ChevronsUpDown" size={14} color={c.foregroundMuted} />
       </Pressable>

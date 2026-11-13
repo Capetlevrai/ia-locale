@@ -14,6 +14,7 @@
 #   bash install.sh                               # tout installer
 #   bash install.sh --data-dir /mnt/data/Capet    # moteur et modèles ailleurs
 #   options : --no-model  --skip-node  --unattended
+#   bash install.sh --uninstall                   # tout retirer (--keep-models garde les modèles)
 set -uo pipefail
 
 OMP_VERSION="18.8.0"
@@ -23,7 +24,7 @@ GATEWAY="http://127.0.0.1:8190"
 STEPS=7
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DATA_DIR=""; NO_MODEL=0; SKIP_NODE=0; UNATTENDED=0
+DATA_DIR=""; NO_MODEL=0; SKIP_NODE=0; UNATTENDED=0; UNINSTALL=0; KEEP_MODELS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --data-dir) DATA_DIR="${2:-}"; shift ;;
@@ -31,6 +32,8 @@ while [ $# -gt 0 ]; do
     --no-model) NO_MODEL=1 ;;
     --skip-node) SKIP_NODE=1 ;;
     --unattended) UNATTENDED=1 ;;
+    --uninstall) UNINSTALL=1 ;;
+    --keep-models) KEEP_MODELS=1 ;;
     *) echo "Option inconnue : $1"; exit 2 ;;
   esac
   shift
@@ -58,6 +61,57 @@ case "$OS" in
   Linux) MAC=0 ;;
   *) echo "Système non pris en charge : $OS (Windows : CapetLocal-Setup.exe)"; exit 1 ;;
 esac
+# --- Désinstallation ---------------------------------------------------------
+# Retire le plugin et l'agent « IA locale » de Paseo, puis le moteur, l'agent Oh My Pi, les
+# journaux et les modèles. Paseo, Bun et Node.js restent : ils servent à d'autres choses.
+if [ "$UNINSTALL" = 1 ]; then
+  if [ "$MAC" = 1 ]; then DEFAULT_HOME="$HOME/Library/Application Support/CapetLocal"
+  else DEFAULT_HOME="${XDG_DATA_HOME:-$HOME/.local/share}/CapetLocal"; fi
+  DATA_DIR="$DEFAULT_HOME"
+  [ -f "$DEFAULT_HOME/home.txt" ] && DATA_DIR="$(tr -d '\r\n' < "$DEFAULT_HOME/home.txt")"
+  echo "Désinstallation de l'IA locale pour Paseo"
+  echo "  Dossier des données : $DATA_DIR"
+  if [ "$UNATTENDED" = 0 ] && [ -t 0 ]; then
+    if [ "$KEEP_MODELS" = 0 ]; then
+      printf '  Supprimer aussi les modèles téléchargés (10 à 19 Go chacun) ? [O/n] '; read -r A
+      case "$A" in n|N) KEEP_MODELS=1 ;; esac
+    fi
+    printf "  Désinstaller l'IA locale maintenant ? [O/n] "; read -r A
+    case "$A" in n|N) echo "Annulé."; exit 0 ;; esac
+  fi
+  curl -fsS -m 30 -X POST "$GATEWAY/capet/stop" >/dev/null 2>&1 && ok "Modèle déchargé"
+  PASEO=""
+  for c in "/Applications/Paseo.app/Contents/Resources/bin/paseo" "$HOME/Applications/Paseo.app/Contents/Resources/bin/paseo" \
+           "/opt/Paseo/resources/bin/paseo" "$HOME/.local/opt/Paseo/resources/bin/paseo" "$(command -v paseo 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { PASEO="$c"; break; }
+  done
+  CONFIG="$HOME/.paseo/config.json"
+  if [ -n "$PASEO" ]; then "$PASEO" plugin remove "$PLUGIN_ID" >/dev/null 2>&1; ok "Plugin retiré de Paseo"; fi
+  HELPER="$HERE/setup/install-helper.mjs"; [ -f "$HELPER" ] || HELPER="$HERE/install-helper.mjs"
+  if [ -f "$CONFIG" ] && [ -x "$HOME/.bun/bin/bun" ] && [ -f "$HELPER" ]; then
+    "$HOME/.bun/bin/bun" "$HELPER" remove-provider "$CONFIG" || warn "Configuration de Paseo non modifiée."
+  fi
+  rm -rf "$HOME/.paseo/plugin-settings/$PLUGIN_ID"
+  [ -n "$PASEO" ] && "$PASEO" reload >/dev/null 2>&1
+  # A llama-server of ours still running.
+  pkill -f "^$DATA_DIR/runtime/" 2>/dev/null
+  # Local agents still open: Oh My Pi processes keep the agent files open.
+  pkill -f "$DATA_DIR/agent/" 2>/dev/null; sleep 1
+  # Only what this installer created: --data-dir may point at a folder with other things.
+  for name in runtime plugin agent omp logs; do rm -rf "${DATA_DIR:?}/$name"; done
+  rm -f "$DATA_DIR/state.json" "$DATA_DIR/calibration.json" "$DATA_DIR/contexts.json"
+  if [ "$KEEP_MODELS" = 1 ]; then
+    ok "Fichiers supprimés, modèles gardés dans $DATA_DIR/models"
+  else
+    rm -rf "${DATA_DIR:?}/models"
+    rm -f "$DEFAULT_HOME/home.txt"
+    rmdir "$DATA_DIR" "$DEFAULT_HOME" 2>/dev/null
+    ok "Fichiers et modèles supprimés"
+  fi
+  printf '\n%sTerminé.%s Paseo, Bun et Node.js restent installés.\n' "$C_GREEN" "$C_OFF"
+  exit 0
+fi
+
 have curl || fail "curl est nécessaire (sudo apt install curl, ou l'équivalent de ta distribution)."
 have tar || fail "tar est nécessaire."
 
@@ -272,10 +326,14 @@ ok "Plugin copié dans $TARGET"
 HELPER="$HERE/setup/install-helper.mjs"
 [ -f "$HELPER" ] || HELPER="$HERE/install-helper.mjs"
 "$BUN" "$HELPER" enable-plugins "$CONFIG" || fail "Configuration de Paseo illisible : $CONFIG"
-if "$PASEO" plugin ls 2>/dev/null | grep -q "^$PLUGIN_ID[[:space:]]"; then
+LISTED="$("$PASEO" plugin ls 2>/dev/null | grep "^$PLUGIN_ID[[:space:]]")"
+# Paseo runs the plugin from the folder it was installed from: after a move of the data
+# folder (--data-dir), a reload would keep running the old copy.
+if [ -n "$LISTED" ] && printf '%s' "$LISTED" | grep -qF "$TARGET"; then
   "$PASEO" plugin reload "$PLUGIN_ID" >/dev/null 2>&1
   ok "Plugin déjà installé : rechargé"
 else
+  [ -n "$LISTED" ] && "$PASEO" plugin remove "$PLUGIN_ID" >/dev/null 2>&1
   "$PASEO" plugin install "$TARGET" >/dev/null 2>&1
   ok "Plugin installé dans Paseo"
 fi
@@ -296,6 +354,7 @@ fi
 printf '\n%sTerminé.%s\n' "$C_GREEN" "$C_OFF"
 echo "Ouvre Paseo, crée un agent et choisis « IA locale » comme fournisseur."
 echo "Réglages (modèle, contexte, outils) : Paseo > IA locale."
+echo "Pour désinstaller : relance ce fichier avec --uninstall (bash CapetLocal-Setup.sh --uninstall)."
 if [ "$UNATTENDED" = 0 ]; then
   if [ "$MAC" = 1 ]; then open -a Paseo 2>/dev/null || true
   elif [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ] && [ -x "$HOME/.local/opt/Paseo/Paseo" ]; then

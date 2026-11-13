@@ -3,6 +3,7 @@
 //   enable-plugins <paseo-config.json>
 //   wait-gateway <seconds>
 //   model <paseo-cli> <paseo-config.json> <plugin-settings.json>   (engine, model, agent)
+//   remove-provider <paseo-config.json>                            (uninstall)
 
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
@@ -101,7 +102,7 @@ async function modelStep(cli, config, settingsFile) {
     warn("Aucun modèle conseillé pour cette machine : choisis-en un dans Paseo > IA locale.");
     return;
   }
-  ok(`Modèle conseillé : ${model.label} (${gb(model.sizeBytes)} Go)`);
+  ok(`${model.id === chosen ? "Modèle choisi" : "Modèle conseillé"} : ${model.label} (${gb(model.sizeBytes)} Go)`);
   if (model.id !== chosen) {
     writeJson(settingsFile, { version: 1, values: { modelId: model.id } });
     paseo(cli, "plugin", "reload", PLUGIN_ID);
@@ -163,6 +164,16 @@ switch (command) {
   case "wait-gateway":
     process.exit((await waitGateway(Number(args[0] ?? 180))) ? 0 : 1);
     break;
+  case "remove-provider": {
+    const json = readJson(args[0]);
+    if (json.agents?.providers?.[PLUGIN_ID]) {
+      copyFileSync(args[0], `${args[0]}.capet-uninstall-${Date.now()}.bak`);
+      delete json.agents.providers[PLUGIN_ID];
+      writeJson(args[0], json);
+      ok("Agent « IA locale » retiré de Paseo");
+    }
+    break;
+  }
   case "model":
     await modelStep(args[0], args[1], args[2]);
     break;

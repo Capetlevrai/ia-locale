@@ -197,16 +197,22 @@ if ($SkipPagefile) {
   Ok "Fichier d'échange laissé tel quel (option -SkipPagefile)"
 } elseif ($roomGb -ge $needGb) {
   Ok ("Mémoire virtuelle suffisante ({0:N0} Go disponibles)" -f $roomGb)
+} elseif ((Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Sort-Object FreeSpace -Descending | Select-Object -First 1).DeviceID -eq $env:SystemDrive -and
+          ((Get-CimInstance Win32_ComputerSystem).AutomaticManagedPagefile -or (Get-CimInstance Win32_PageFileSetting | Where-Object { $_.Name -like "$($env:SystemDrive)\*" -and $_.MaximumSize -eq 0 }))) {
+  # Windows already sizes a paging file by itself on the roomiest drive: another setting
+  # would change nothing, so don't ask for administrator rights and don't claim a fix.
+  Warn ("Mémoire virtuelle juste ({0:N0} Go pour {1:N0} Go conseillés) et Windows gère déjà le fichier d'échange sur {2} : libère de la place sur ce disque si le modèle ne se charge pas. Le plugin réduira la VRAM utilisée si besoin." -f $roomGb, $needGb, $env:SystemDrive)
 } else {
   $disk = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Sort-Object FreeSpace -Descending | Select-Object -First 1
   $file = "$($disk.DeviceID)\pagefile.sys"
+  $sysFile = "$($env:SystemDrive)\pagefile.sys"
   Write-Host ("  Mémoire virtuelle juste ({0:N0} Go pour {1:N0} Go conseillés) : ajout d'un fichier d'échange sur {2}" -f $roomGb, $needGb, $disk.DeviceID)
   # System-managed sizes (0/0) on the roomiest drive; the existing one stays.
   $fix = @"
 `$cs = Get-CimInstance Win32_ComputerSystem
 if (`$cs.AutomaticManagedPagefile) { Set-CimInstance -InputObject `$cs -Property @{ AutomaticManagedPagefile = `$false } }
-if (-not (Get-CimInstance Win32_PageFileSetting | Where-Object Name -eq 'C:\pagefile.sys')) {
-  New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = 'C:\pagefile.sys'; InitialSize = [uint32]0; MaximumSize = [uint32]0 } | Out-Null
+if (-not (Get-CimInstance Win32_PageFileSetting | Where-Object Name -eq '$sysFile')) {
+  New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = '$sysFile'; InitialSize = [uint32]0; MaximumSize = [uint32]0 } | Out-Null
 }
 if (-not (Get-CimInstance Win32_PageFileSetting | Where-Object Name -eq '$file')) {
   New-CimInstance -ClassName Win32_PageFileSetting -Property @{ Name = '$file'; InitialSize = [uint32]0; MaximumSize = [uint32]0 } | Out-Null
@@ -232,6 +238,10 @@ if (-not $DataDir) {
   # Keep a folder chosen by a previous install; otherwise C: if it has room for models.
   if (Test-Path $pointer) {
     $DataDir = (Get-Content -Raw $pointer).Trim([char]0xFEFF, " ", "`r", "`n")
+  } elseif ((Test-Path (Join-Path $defaultHome "models")) -or (Test-Path (Join-Path $defaultHome "runtime"))) {
+    # Already installed here: stay, even when C: has since filled up. Moving to another
+    # drive would download the engine and 10-19 GB of models again.
+    $DataDir = $defaultHome
   } else {
     $c = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($env:SystemDrive)'"
     $best = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Sort-Object FreeSpace -Descending | Select-Object -First 1
@@ -314,6 +324,11 @@ New-Item -ItemType Directory -Force $target | Out-Null
 robocopy $source $target /MIR /XD node_modules tools /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { Fail "Copie du plugin impossible (robocopy $LASTEXITCODE)." }
 Ok "Plugin copié dans $target"
+# The uninstaller stays on the PC, next to the data pointer (this folder always exists).
+foreach ($name in "uninstall.ps1", "Desinstaller.cmd") {
+  $from = Join-Path $PSScriptRoot $name
+  if (Test-Path $from) { Copy-Item $from (Join-Path $defaultHome $name) -Force }
+}
 
 # Third-party plugins only load with "pluginsEnabled": true (no CLI flag for it).
 $raw = Get-Content -Raw -Encoding UTF8 $config
@@ -325,10 +340,16 @@ if ($raw -notmatch '"pluginsEnabled"\s*:\s*true') {
   Ok "Plugins tiers activés dans Paseo"
 }
 $installed = Native { & $paseo plugin ls }
-if ($installed -match "(?m)^$PluginId\s") {
+# Paseo runs the plugin from the folder it was installed from: after a move of the data
+# folder (-DataDir), a reload would keep running the old copy.
+$registered = ""
+try { $registered = ((Native { & $paseo plugin ls $PluginId --json }) | ConvertFrom-Json)[0].path } catch {}
+$sameFolder = $registered -and ([IO.Path]::GetFullPath($registered).TrimEnd('\') -eq [IO.Path]::GetFullPath($target).TrimEnd('\'))
+if ($installed -match "(?m)^$PluginId\s" -and $sameFolder) {
   Native { & $paseo plugin reload $PluginId } | Out-Null
   Ok "Plugin déjà installé : rechargé"
 } else {
+  if ($installed -match "(?m)^$PluginId\s") { Native { & $paseo plugin remove $PluginId } | Out-Null }
   Native { & $paseo plugin install $target } | Out-Null
   Ok "Plugin installé dans Paseo"
 }
@@ -361,7 +382,8 @@ if ($NoModel) {
   if (-not $model) {
     Warn "Aucun modèle conseillé pour cette carte : choisis-en un dans Paseo > IA locale."
   } else {
-    Ok "Modèle conseillé : $($model.label) ($(Gb $model.sizeBytes) Go)"
+    $why = if ($model.id -eq $chosen) { "Modèle choisi" } else { "Modèle conseillé" }
+    Ok "$why : $($model.label) ($(Gb $model.sizeBytes) Go)"
     if ($model.id -ne $chosen) {
       New-Item -ItemType Directory -Force (Split-Path $settings) | Out-Null
       [IO.File]::WriteAllText($settings, (@{ version = 1; values = @{ modelId = $model.id } } | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding $false))
@@ -413,6 +435,7 @@ if ($NoModel) {
 Write-Host "`nTerminé." -ForegroundColor Green
 Write-Host "Ouvre Paseo, crée un agent et choisis « IA locale » comme fournisseur."
 Write-Host "Réglages (modèle, contexte, outils) : Paseo > IA locale."
+Write-Host "Pour désinstaller : double-clique sur Desinstaller.cmd dans $defaultHome"
 if (-not $Unattended) {
   $app = Join-Path (Split-Path (Split-Path (Split-Path $paseo))) "Paseo.exe"
   # Through Explorer: started from here, Paseo inherits this console and prints its logs
