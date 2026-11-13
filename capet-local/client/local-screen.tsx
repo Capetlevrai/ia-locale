@@ -170,8 +170,8 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
 
       <SettingsSection title="2. Modèle">
         <Text style={styles.muted}>
-          Le modèle choisi ici est celui des nouveaux agents. Dans un agent, tu peux passer à un autre modèle téléchargé
-          avec le sélecteur de modèle, sous la zone de texte : il se charge à ton prochain message (une à deux minutes).
+          Le modèle choisi ici répond à tous tes agents IA locale. Son nom s'affiche dans le sélecteur de modèle de
+          chaque agent, sous la zone de texte : pour en changer, c'est ici ou dans le panneau en bas à gauche.
         </Text>
         {s.models.map((m) => {
           const running = m.download?.state === "running";
@@ -197,7 +197,7 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
               label={active ? `✓ ${m.label}` : m.label}
               hint={loaded?.id === m.id && s.engine.state === "ready" ? `${hint}
 ● Chargé sur la carte` : hint}
-              actionLabel={active ? "Par défaut" : "Utiliser"}
+              actionLabel={active ? "Choisi" : "Utiliser"}
               disabled={active}
               onPress={() => save({ modelId: m.id })}
             />

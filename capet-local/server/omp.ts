@@ -57,6 +57,14 @@ function localCompaction(contexts: number[], percent: number) {
   };
 }
 
+/**
+ * The one model agents see, under an id that never changes. Its NAME is the label of the
+ * model that answers right now, so the model picker of every agent shows what is really
+ * loaded. With one id per model, the picker kept the name an agent was opened with while
+ * IA locale had loaded another model: two places disagreeing about which model answers.
+ */
+export const LOCAL_MODEL_ID = "local";
+
 export interface OmpModel {
   model: CatalogModel;
   /** Context the engine gives this model: measured once loaded, estimated before. */
@@ -69,7 +77,7 @@ function modelEntry({ model, ctx, temperature }: OmpModel) {
     ? { mode: "effort", efforts: model.reasoningEfforts, defaultLevel: "medium" }
     : undefined;
   return {
-    id: model.id,
+    id: LOCAL_MODEL_ID,
     name: model.label,
     reasoning: true,
     // Always: with vision off, OMP's own text-only path ends in an English error
@@ -103,10 +111,8 @@ function modelEntry({ model, ctx, temperature }: OmpModel) {
 }
 
 /**
- * Write the isolated OMP agent dir: every downloaded local model (the agent's model
- * picker in Paseo lists them, and the gateway loads the one an agent asks for), only
- * the MCPs the user ticked, and every cloud provider disabled so OMP never reaches out.
- * `defaultId` is the model a new agent starts on.
+ * Write the isolated OMP agent dir: the local model (one entry, see LOCAL_MODEL_ID),
+ * only the MCPs the user ticked, and every cloud provider disabled so OMP never reaches out.
  */
 export function writeOmpConfig(
   entries: OmpModel[],

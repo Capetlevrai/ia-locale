@@ -72,9 +72,10 @@ Bon à savoir
   VRAM utilisée. Choisis le modèle, puis Lancer (vert) ou Arrêter (rouge) pour
   libérer la carte avant de jouer.
 - Le modèle se décharge après 30 minutes sans utilisation pour libérer la carte.
-- Plusieurs modèles téléchargés ? Dans un agent, le sélecteur de modèle (sous la zone de
-  texte) les liste tous : choisis-en un autre, il se charge à ton prochain message (une
-  à deux minutes). Le modèle choisi dans IA locale est celui des nouveaux agents.
+- Pour changer de modèle : le panneau IA locale en bas à gauche, ou la page IA locale.
+  C'est le seul endroit où on le choisit. Le sélecteur de modèle de chaque agent (sous la
+  zone de texte) affiche le nom du modèle chargé, et les agents ouverts prennent tout
+  seuls ses réglages (taille du contexte, niveaux d'effort) en gardant leur conversation.
 - Un seul modèle tourne à la fois sur la carte : deux agents locaux se passent la main,
   l'un attend que l'autre ait fini sa réponse.
 - Les niveaux d'effort (Low, Medium, xHigh) existent pour Swift 1.5, pas pour Qwen3.6.

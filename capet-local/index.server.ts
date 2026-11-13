@@ -20,7 +20,7 @@ import * as engine from "./server/engine";
 import { callsInFlight, gatewayError, recentCalls, startGateway, stopGateway } from "./server/gateway";
 import * as stats from "./server/stats";
 import { detectGpu, findOmp, hasNpx, ompVersion } from "./server/hardware";
-import { OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig, type OmpModel } from "./server/omp";
+import { LOCAL_MODEL_ID, OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig } from "./server/omp";
 import { GATEWAY_PORT, paths, PROVIDER_ID } from "./server/paths";
 import { findServerExe, installRuntime, runtimeDownload, runtimeLabel } from "./server/runtime";
 import { latestRelease } from "./server/update";
@@ -165,12 +165,11 @@ export default function contribute(server: PluginServerContext) {
   }
 
   /**
-   * Give OMP every downloaded model, each with the context the engine gives it: the model
-   * picker of an agent lists them all, and the gateway loads the one the agent is on.
-   * `p` is the plan just applied or loaded; its model is the one new agents start on
-   * unless `keepDefault` (a model an agent asked for must not become everyone's default).
+   * Tell OMP which model answers: `p` is the plan just applied or loaded. Agents see a
+   * single model whose name is this one's (omp.ts, LOCAL_MODEL_ID), with the context the
+   * engine gives it.
    */
-  async function syncAgentConfig(p: engine.EnginePlan, keepDefault = false): Promise<void> {
+  async function syncAgentConfig(p: engine.EnginePlan): Promise<void> {
     const { values } = await readSettings();
     const card = await gpu();
     const live = engine.engineStatus();
@@ -185,70 +184,64 @@ export default function contribute(server: PluginServerContext) {
         }
       }
     }
-    const entries: OmpModel[] = [];
-    for (const model of MODELS.filter(modelInstalled)) {
-      const exe = p.exe;
-      const each = model.id === p.model.id ? p : engine.makePlan(model, exe, p.variant, values, p.revision);
-      // A model the VRAM budget cannot hold would only fail to load when picked: leave it
-      // out of the agents' model list (IA locale still shows it, with what it needs).
-      const tooBig =
-        each !== p &&
-        each.budgetMiB !== null &&
-        each.budgetMiB < engine.minBudgetMiB(model, engine.visionOnGpu(each), each.speculative === "dflash");
-      if (tooBig) continue;
-      entries.push({ model, ctx: contextFor(each, card), temperature: each.temperature });
-    }
-    const saved = findModel(values.modelId);
-    const defaultId = keepDefault && saved && modelInstalled(saved) ? saved.id : p.model.id;
-    writeOmpConfig(entries, defaultId, enabledMcps(values), { local: values.localCompaction, percent: values.compactPercent });
-    // Paseo caches the provider's model list: re-probe when what OMP exposes changes,
-    // or a new agent would ask OMP for a model that is gone.
-    const exposed = JSON.stringify([defaultId, entries.map((e) => [e.model.id, e.ctx])]);
+    const ctx = contextFor(p, card);
+    writeOmpConfig([{ model: p.model, ctx, temperature: p.temperature }], p.model.id, enabledMcps(values), {
+      local: values.localCompaction,
+      percent: values.compactPercent,
+    });
+    // Paseo caches the provider's model list: re-probe when the model or its context
+    // changes, so every agent's model picker shows the name of the model that answers.
+    const exposed = `${p.model.id}|${ctx}`;
     if (exposed !== advertised) {
       advertised = exposed;
       if (paseoClient) await refreshProvider(paseoClient);
       else refreshPending = true;
     }
+    // Loaded, so the context is the real one: open agents must take it.
+    if (engine.isReady() && engine.currentPlan() === p && exposed !== agentsOpenedWith) {
+      agentsOpenedWith = exposed;
+      if (paseoClient) void reopenIdleAgents(paseoClient);
+    }
+  }
+
+  /** Model and context the open agents were last reopened for. */
+  let agentsOpenedWith: string | null = null;
+
+  /**
+   * An agent reads its model's settings (context size, thinking levels) when its session
+   * opens. After another model is loaded, an agent still open would keep the old context:
+   * larger than the new model's, a long conversation ends in an engine error. Reopen the
+   * local agents used since the plugin started, when they are idle (a reload interrupts a
+   * running turn); a busy one keeps its settings until the next change. Its conversation
+   * is kept. Older Paseo versions have no reload: nothing happens there.
+   */
+  async function reopenIdleAgents(paseo: PaseoApi): Promise<void> {
+    for (const { agentId, current } of stats.agentStats()) {
+      if (current) continue;
+      try {
+        const handle = paseo.agents.ref(agentId) as { reload?: () => Promise<unknown> };
+        await handle.reload?.();
+      } catch (error) {
+        // Deleted or archived since: nothing to reopen.
+        console.error(`[capet-local] agent ${agentId} not reopened`, error);
+      }
+    }
   }
 
   /**
-   * The engine ready on the model an agent asks for. `requested` is the id its model
-   * picker sends; anything else (an old agent's name, a model since deleted) gets the
-   * model already loaded, or the one chosen in IA locale.
+   * The engine ready, on the model chosen in IA locale: that is the only place a model is
+   * chosen, whatever name an agent sends (agents opened by older versions send a model id).
+   * Returns the id of the model that serves.
    */
-  async function ensureEngine(
-    requested: string | null = null,
-    idle: () => boolean = () => true,
-    gone: () => boolean = () => false,
-  ): Promise<string> {
-    const asked = requested ? findModel(requested) : undefined;
-    const want = asked && modelInstalled(asked) ? asked.id : null;
+  async function ensureEngine(_requested: string | null = null, _idle?: () => boolean, gone: () => boolean = () => false): Promise<string> {
     const loaded = engine.currentPlan();
-    if (engine.isReady() && loaded && (!want || want === loaded.model.id)) return loaded.model.id;
-    // After an idle unload, come back on the model that was loaded, not the saved default.
-    const modelId = want ?? loaded?.model.id;
-    const next = await plan({}, modelId);
-    const swap = engine.isReady() && loaded && loaded.model.id !== next.model.id;
-    // Another agent is mid-answer on the loaded model: let it finish, a swap would cut it.
-    while (swap && !idle() && !gone()) await new Promise((resolve) => setTimeout(resolve, 250));
-    // The agent gave up while waiting: don't unload a model for a call nobody reads.
+    if (engine.isReady() && loaded) return loaded.model.id;
+    const next = await plan();
+    // The agent gave up while waiting: don't load a model for a call nobody reads.
     if (gone()) return next.model.id;
     await engine.start(next);
-    await syncAgentConfig(next, true);
+    await syncAgentConfig(next);
     return next.model.id;
-  }
-
-  /**
-   * A model just finished downloading: add it to the list agents choose from, without
-   * waiting for the next Apply. Nothing to do before a first model was ever set up.
-   */
-  async function offerNewModel(): Promise<void> {
-    try {
-      const p = engine.currentPlan() ?? (await plan());
-      await syncAgentConfig(p, true);
-    } catch {
-      // No model chosen or engine not installed yet: Apply will write the list.
-    }
   }
 
   /** The "IA locale" entry of Paseo's agents.providers (also written by install.ps1). */
@@ -302,7 +295,6 @@ export default function contribute(server: PluginServerContext) {
         `${part}:${model.id}`,
         model.label,
         files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 })),
-        offerNewModel,
       );
       return { started: true, files: files.map((f) => f.localName) };
     }
@@ -357,6 +349,14 @@ export default function contribute(server: PluginServerContext) {
     }),
   );
 
+  const stopWatchingSettings = settings.subscribe(() => {
+    const state = engine.engineStatus().state;
+    if (state === "ready" || state === "starting") return; // Apply will sync with the loaded model.
+    void plan()
+      .then(syncAgentConfig)
+      .catch(() => {});
+  });
+
   const idleTimer = setInterval(() => {
     void readSettings()
       .then(({ values }) => {
@@ -372,7 +372,9 @@ export default function contribute(server: PluginServerContext) {
     if (request.config.provider !== PROVIDER_ID) return;
     // Load the model while OMP boots instead of on its first request.
     lastActivity = Date.now();
-    void ensureEngine(typeof request.config.model === "string" ? request.config.model : null).catch(() => {});
+    void ensureEngine().catch(() => {});
+    // Whatever model the composer remembered (an id from an older version): the one entry.
+    request.config.model = `${PROVIDER_ID}/${LOCAL_MODEL_ID}`;
     const { values } = await readSettings();
     if (!values.paseoTools && request.config.mcpServers) {
       const { paseo: _dropped, ...rest } = request.config.mcpServers;
@@ -503,7 +505,6 @@ export default function contribute(server: PluginServerContext) {
       `${part}:${modelId}`,
       part === "dflash" ? `DFlash ${model.label}` : model.label,
       files.map((f) => ({ url: hfUrl(f), dest: engine.modelPath(f.localName), size: f.size, sha256: f.sha256 })),
-      offerNewModel,
     );
     return { ok: true };
   });
@@ -557,9 +558,7 @@ export default function contribute(server: PluginServerContext) {
       .catch(() => {});
     return {
       ok: true,
-      message:
-        `Chargement de ${next.model.label}. ${vramPlanText(next, previousUsedMiB)} ` +
-        "Les nouveaux agents démarrent sur ce modèle ; un agent déjà ouvert garde le sien, à changer dans son sélecteur de modèle, sous la zone de texte.",
+      message: `Chargement de ${next.model.label}. ${vramPlanText(next, previousUsedMiB)}`,
     };
   });
 
@@ -570,6 +569,7 @@ export default function contribute(server: PluginServerContext) {
 
   return () => {
     clearInterval(idleTimer);
+    stopWatchingSettings();
     stopGateway();
     void engine.stop();
   };
