@@ -42,6 +42,18 @@ complémentaires » puis « Exécuter quand même ».
 
 Détails, modèles proposés et dépannage : [LISEZMOI.txt](LISEZMOI.txt).
 
+## Au quotidien
+
+- **Choisir le modèle** : dans le panneau IA locale en bas à gauche de Paseo, ou dans la page
+  IA locale. C'est le seul endroit où on le choisit ; le sélecteur de modèle de chaque agent
+  affiche le nom du modèle chargé.
+- **Libérer la carte graphique** (pour jouer) : bouton Arrêter du panneau. Le modèle se
+  recharge tout seul au prochain message, et se décharge après 30 minutes sans utilisation.
+- **Faire de la place sur le disque** : page IA locale, section Modèle, « Faire de la place ».
+  Un modèle supprimé peut être retéléchargé.
+- **Streamer ou jouer en même temps** : mode « Budget VRAM » dans la page IA locale. Le budget
+  s'ajuste tout seul si le modèle choisi en demande plus.
+
 ## Mettre à jour, désinstaller
 
 - **Mettre à jour** : télécharge le nouvel installateur et lance-le. Il remplace le plugin sans
