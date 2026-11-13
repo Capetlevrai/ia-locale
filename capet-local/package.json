@@ -1,7 +1,7 @@
 {
   "name": "capet-local",
   "private": true,
-  "version": "0.3.6",
+  "version": "0.3.7",
   "files": [
     "paseo-plugin.json",
     "OVERVIEW.md",

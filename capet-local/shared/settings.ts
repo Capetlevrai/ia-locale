@@ -50,6 +50,26 @@ export const LocalSettingsSchema = z.object({
 });
 export type LocalSettings = z.infer<typeof LocalSettingsSchema>;
 
+/**
+ * What to save when the user picks a model. In « Budget VRAM » mode, a budget set for a
+ * lighter model (15 GB) is too small for a bigger one (the 24 GB model needs 17): the load
+ * would only end in an error. Raise the budget to what the picked model needs; the caller
+ * tells the user. A budget that is large enough is never touched.
+ */
+export function settingsForModel(
+  values: LocalSettings,
+  model: { id: string; comfortBudgetGb: number | null },
+): { patch: Partial<LocalSettings>; raisedTo: number | null } {
+  const needed = model.comfortBudgetGb;
+  const raise = values.contextMode === "budget" && values.vramBudgetGb > 0 && needed !== null && values.vramBudgetGb < needed;
+  return { patch: { modelId: model.id, ...(raise ? { vramBudgetGb: needed } : {}) }, raisedTo: raise ? needed : null };
+}
+
+/** Sentence shown when settingsForModel raised the budget. */
+export function budgetRaisedText(label: string, from: number, to: number): string {
+  return `${label} a besoin de plus de place : le budget VRAM passe de ${from} à ${to} Go.`;
+}
+
 export const localSettings = defineSettings({
   id: "local",
   scope: "host",

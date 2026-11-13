@@ -23,7 +23,8 @@ import {
   type Progress,
   type Status,
 } from "../shared/rpc";
-import { localSettings, type LocalSettings, type Speculative } from "../shared/settings";
+import { budgetRaisedText, localSettings, settingsForModel, type LocalSettings, type Speculative } from "../shared/settings";
+import { useToast } from "@getpaseo/plugin/client/react-native";
 import { detailRows, latestTurn } from "../shared/format";
 import { openExternal } from "./web";
 
@@ -57,6 +58,7 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
   const installRuntime = useMutation({ mutationFn: useRpc(installRuntimeRpc) });
   const apply = useMutation({ mutationFn: useRpc(applyRpc) });
   const stop = useMutation({ mutationFn: useRpc(stopRpc) });
+  const toast = useToast();
 
   const styles = useMemo(
     () => ({
@@ -199,7 +201,11 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
 ● Chargé sur la carte` : hint}
               actionLabel={active ? "Choisi" : "Utiliser"}
               disabled={active}
-              onPress={() => save({ modelId: m.id })}
+              onPress={() => {
+                const { patch, raisedTo } = settingsForModel(values, m);
+                save(patch);
+                if (raisedTo !== null) toast.show(budgetRaisedText(m.label, values.vramBudgetGb, raisedTo), { variant: "info", durationMs: 8000 });
+              }}
             />
           );
         })}
@@ -391,7 +397,17 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
           error={apply.data && !apply.data.ok ? apply.data.message : null}
           actionLabel="Appliquer"
           disabled={!ready || s.engine.state === "starting"}
-          onPress={() => apply.mutate({})}
+          onPress={async () => {
+            // A budget too small for the chosen model: raise it first (see settingsForModel).
+            if (selected) {
+              const { patch, raisedTo } = settingsForModel(values, selected);
+              if (raisedTo !== null) {
+                await settings.save({ ...values, ...patch }, settings.revision);
+                toast.show(budgetRaisedText(selected.label, values.vramBudgetGb, raisedTo), { variant: "info", durationMs: 8000 });
+              }
+            }
+            apply.mutate({});
+          }}
         />
         {s.engine.state !== "stopped" && (
           <SettingsAction

@@ -435,6 +435,16 @@ export default function contribute(server: PluginServerContext) {
       }
     }
 
+    /** Budget (whole GB) that gives a model a usable context on this card: see ModelStatus. */
+    const comfortBudgetGb = (m: CatalogModel): number | null => {
+      const withDflash = dflash && !!m.dflash;
+      const minGb = Math.ceil(engine.minBudgetMiB(m, vision(m), withDflash) / 1024);
+      for (let gb = minGb; gb <= vramGb; gb++) {
+        if (engine.estimateCtx(m, gb * 1024, vision(m), withDflash) >= 32768) return gb;
+      }
+      return minGb <= vramGb ? minGb : null;
+    };
+
     return {
       gpu: card,
       runtime: {
@@ -469,6 +479,7 @@ export default function contribute(server: PluginServerContext) {
           dflashInstalled: !!m.dflash && existsSync(engine.modelPath(m.dflash.localName)),
           dflashDownload: jobProgress(`dflash:${m.id}`),
           minBudgetMiB: engine.minBudgetMiB(m, vision(m), dflash && !!m.dflash),
+          comfortBudgetGb: comfortBudgetGb(m),
         };
       }),
       mcp: MCPS.map((m) => ({

@@ -14,7 +14,7 @@ import {
   type ModelStatus,
   type Progress,
 } from "../shared/rpc";
-import { localSettings } from "../shared/settings";
+import { budgetRaisedText, localSettings, settingsForModel } from "../shared/settings";
 
 type Colors = PluginHostProps["theme"]["colors"];
 
@@ -249,6 +249,16 @@ export function GpuPanel({ theme, openScreen, openPopover }: PluginSidebarItemPr
     }
   };
 
+  // A budget saved before this version can be too small for the chosen model: fix it
+  // before loading rather than fail on « ne tient pas dans 15 Go ».
+  const fitBudget = async () => {
+    if (settings.status !== "ready" || !selected) return;
+    const { patch, raisedTo } = settingsForModel(settings.values, selected);
+    if (raisedTo === null) return;
+    await settings.save({ ...settings.values, ...patch }, settings.revision);
+    toast.show(budgetRaisedText(selected.label, settings.values.vramBudgetGb, raisedTo), { variant: "info", durationMs: 8000 });
+  };
+
   // Not set up yet (model not downloaded…): the start button leads to the IA locale screen.
   const start = !ready
     ? { label: "Configurer", glyph: "settings" as const, color: c.foreground, enabled: true, onPress: openLocal }
@@ -257,7 +267,11 @@ export function GpuPanel({ theme, openScreen, openPopover }: PluginSidebarItemPr
         glyph: state === "starting" ? ("loading" as const) : ("play" as const),
         color: c.statusSuccess,
         enabled: !running && !busy,
-        onPress: () => void run(() => apply({})),
+        onPress: () =>
+          void run(async () => {
+            await fitBudget();
+            return apply({});
+          }),
       };
 
   const gpu = s.gpu;
@@ -373,9 +387,12 @@ function ModelPicker({ theme, close, openScreen }: PluginPopoverProps) {
 
   const choose = async (modelId: string) => {
     if (modelId === values.modelId) return close();
-    const saved = await settings.save({ ...values, modelId }, settings.revision);
+    const model = s.models.find((m) => m.id === modelId);
+    const { patch, raisedTo } = model ? settingsForModel(values, model) : { patch: { modelId }, raisedTo: null };
+    const saved = await settings.save({ ...values, ...patch }, settings.revision);
     close();
     if (!saved) return toast.error("Le choix du modèle n'a pas été enregistré.");
+    if (model && raisedTo !== null) toast.show(budgetRaisedText(model.label, values.vramBudgetGb, raisedTo), { variant: "info", durationMs: 8000 });
     // A loaded engine switches to the new model right away.
     if (s.engine.state === "ready" || s.engine.state === "starting") {
       const result = await apply({});

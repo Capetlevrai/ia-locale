@@ -48,6 +48,11 @@ export interface ModelStatus {
   features: { mtp: boolean; dflash: boolean; vision: boolean };
   /** Smallest VRAM budget (MiB) that holds this model with the current vision/DFlash choice and a 16K context. */
   minBudgetMiB: number;
+  /**
+   * Smallest whole-GB budget that gives this model a usable context (32K) on this card,
+   * its bare minimum when the card can't do better, null when it does not fit at all.
+   */
+  comfortBudgetGb: number | null;
   dflashInstalled: boolean;
   dflashDownload: Progress | null;
 }
