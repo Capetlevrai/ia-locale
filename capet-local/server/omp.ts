@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { CatalogMcp, CatalogModel } from "./catalog";
+import { MODELS, type CatalogMcp, type CatalogModel } from "./catalog";
 import { GATEWAY_PORT, paths, PROVIDER_ID } from "./paths";
 
 export const OMP_CONFIG = join(paths.omp, "config.yml");
@@ -72,12 +72,12 @@ export interface OmpModel {
   temperature: number;
 }
 
-function modelEntry({ model, ctx, temperature }: OmpModel) {
+function modelEntry({ model, ctx, temperature }: OmpModel, id: string = LOCAL_MODEL_ID) {
   const thinking = model.reasoningEfforts
     ? { mode: "effort", efforts: model.reasoningEfforts, defaultLevel: "medium" }
     : undefined;
   return {
-    id: LOCAL_MODEL_ID,
+    id,
     name: model.label,
     reasoning: true,
     // Always: with vision off, OMP's own text-only path ends in an English error
@@ -128,7 +128,14 @@ export function writeOmpConfig(
         baseUrl: `http://127.0.0.1:${GATEWAY_PORT}/v1`,
         api: "openai-completions",
         auth: "none",
-        models: ordered.map(modelEntry),
+        models: [
+          ...ordered.map((entry) => modelEntry(entry)),
+          // Up to 0.3.2 each model had its own id, and OMP writes the model into every
+          // conversation it saves: reopening one of those stops with « Could not restore
+          // model capet-local/swift15-27b-iq4 » if the id is unknown. Keep the old ids as
+          // doubles of the one entry. They stay out of the model picker (enabledModels below).
+          ...MODELS.flatMap((old) => ordered.slice(0, 1).map((entry) => modelEntry(entry, old.id))),
+        ],
       },
     },
   };
@@ -140,7 +147,7 @@ export function writeOmpConfig(
   const roles = ["smol", "slow", "plan", "commit", "tiny", "task", "advisor", "vision", "memory"];
   const config = {
     modelRoles: Object.fromEntries(roles.map((role) => [role, "@default"])),
-    enabledModels: [`${PROVIDER_ID}/*`],
+    enabledModels: [`${PROVIDER_ID}/${LOCAL_MODEL_ID}`],
     hideThinkingBlock: false,
     startup: { setupWizard: false, showSplash: false, quiet: true },
     mcp: { startupTimeoutMs: 0 },
