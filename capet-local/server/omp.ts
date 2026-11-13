@@ -127,10 +127,13 @@ export function writeOmpConfig(
     },
   };
 
-  // Every role on the agent's own model: a subagent must never trigger a model swap.
+  // Every role on the agent's own model: a helper call (title, summary, subagent) must never
+  // ask for another model than the one the agent is on, or the engine would swap models at
+  // every step. No `default` role on purpose: with none configured, `@default` is the model
+  // of the session, the one picked in the agent; a configured one would pin helpers to it.
   const roles = ["smol", "slow", "plan", "commit", "tiny", "task", "advisor", "vision", "memory"];
   const config = {
-    modelRoles: { default: `${PROVIDER_ID}/${defaultId}`, ...Object.fromEntries(roles.map((role) => [role, "@default"])) },
+    modelRoles: Object.fromEntries(roles.map((role) => [role, "@default"])),
     enabledModels: [`${PROVIDER_ID}/*`],
     hideThinkingBlock: false,
     startup: { setupWizard: false, showSplash: false, quiet: true },

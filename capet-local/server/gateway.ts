@@ -14,7 +14,7 @@ export interface GatewayHooks {
    * return the model id it serves. `idle` tells when no call is in flight: a model swap
    * waits for it.
    */
-  ensureEngine(requested: string | null, idle: () => boolean): Promise<string>;
+  ensureEngine(requested: string | null, idle: () => boolean, gone: () => boolean): Promise<string>;
   /** Model the engine serves right now, or null while it is stopped or loading. */
   loadedModel(): string | null;
   onActivity(): void;
@@ -41,6 +41,24 @@ let inFlight = 0;
 let listenError: string | null = null;
 let retry: ReturnType<typeof setTimeout> | null = null;
 let stopped = false;
+
+/** Calls waiting for the engine, in arrival order (see handle()). */
+let queue: Promise<void> = Promise.resolve();
+
+/** The last calls agents made: what they asked for and what served them. Helps support. */
+const recent: string[] = [];
+function note(req: IncomingMessage, requested: string | null, served: string): void {
+  recent.push(`${new Date().toISOString().slice(11, 19)} ${req.method} ${req.url} demandé=${requested ?? "-"} servi=${served}`);
+  if (recent.length > 40) recent.shift();
+}
+export function recentCalls(): string[] {
+  return recent;
+}
+
+/** Calls the engine is serving right now (a model swap waits for 0). */
+export function callsInFlight(): number {
+  return inFlight;
+}
 
 export function gatewayError(): string | null {
   return listenError;
@@ -145,20 +163,47 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
   // another downloaded one, it is loaded in its place, once the calls in flight are done
   // (they would be cut otherwise). Then hold the engine for this call.
   const requested = json && Array.isArray(json.messages) && typeof json.model === "string" ? json.model : null;
+  // The agent can give up while its call waits for a model to load (interrupted, model
+  // changed again): listen from now on. A call counted after its connection closed would
+  // never be released, and every later model swap would wait for it forever.
+  let gone = false;
+  let held = false;
+  res.on("close", () => {
+    gone = true;
+    if (held) {
+      held = false;
+      inFlight -= 1;
+    }
+  });
+  // One call at a time decides what the engine holds. Two calls asking for two different
+  // models at once (two agents, or an agent and one of its helpers) would otherwise each
+  // cancel the other's load, forever: first come, first served, the next one swaps after.
+  const turn = queue;
+  let done!: () => void;
+  queue = new Promise<void>((resolve) => (done = resolve));
   let modelId: string;
-  for (;;) {
-    modelId = await hooks.ensureEngine(requested, () => inFlight === 0);
-    if (hooks.loadedModel() === modelId) break;
+  try {
+    await turn;
+    for (;;) {
+      modelId = await hooks.ensureEngine(requested, () => inFlight === 0, () => gone);
+      if (gone) {
+        note(req, requested, "abandonné");
+        return;
+      }
+      if (hooks.loadedModel() === modelId) break;
+    }
+    inFlight += 1;
+    held = true;
+  } finally {
+    done();
   }
-  inFlight += 1;
-  let released = false;
+  note(req, requested, modelId);
   const release = () => {
-    if (!released) {
-      released = true;
+    if (held) {
+      held = false;
       inFlight -= 1;
     }
   };
-  res.on("close", release);
 
   let payload = body;
   let isCompletion = false;

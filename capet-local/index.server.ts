@@ -17,7 +17,7 @@ import { localSettings, LocalSettingsSchema, type LocalSettings } from "./shared
 import { findModel, MCPS, MODELS, OMP_BASE_TOKENS, RUNTIME, type CatalogModel, type RuntimeVariant } from "./server/catalog";
 import { cancelJob, hfUrl, jobProgress, startJob } from "./server/download";
 import * as engine from "./server/engine";
-import { gatewayError, startGateway, stopGateway } from "./server/gateway";
+import { callsInFlight, gatewayError, recentCalls, startGateway, stopGateway } from "./server/gateway";
 import * as stats from "./server/stats";
 import { detectGpu, findOmp, hasNpx, ompVersion } from "./server/hardware";
 import { OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig, type OmpModel } from "./server/omp";
@@ -216,7 +216,11 @@ export default function contribute(server: PluginServerContext) {
    * picker sends; anything else (an old agent's name, a model since deleted) gets the
    * model already loaded, or the one chosen in IA locale.
    */
-  async function ensureEngine(requested: string | null = null, idle: () => boolean = () => true): Promise<string> {
+  async function ensureEngine(
+    requested: string | null = null,
+    idle: () => boolean = () => true,
+    gone: () => boolean = () => false,
+  ): Promise<string> {
     const asked = requested ? findModel(requested) : undefined;
     const want = asked && modelInstalled(asked) ? asked.id : null;
     const loaded = engine.currentPlan();
@@ -226,7 +230,9 @@ export default function contribute(server: PluginServerContext) {
     const next = await plan({}, modelId);
     const swap = engine.isReady() && loaded && loaded.model.id !== next.model.id;
     // Another agent is mid-answer on the loaded model: let it finish, a swap would cut it.
-    while (swap && !idle()) await new Promise((resolve) => setTimeout(resolve, 250));
+    while (swap && !idle() && !gone()) await new Promise((resolve) => setTimeout(resolve, 250));
+    // The agent gave up while waiting: don't unload a model for a call nobody reads.
+    if (gone()) return next.model.id;
     await engine.start(next);
     await syncAgentConfig(next, true);
     return next.model.id;
@@ -271,6 +277,7 @@ export default function contribute(server: PluginServerContext) {
   async function admin(method: string, path: string, body: unknown): Promise<unknown> {
     if (method === "GET" && path === "status") return buildStatus();
     if (method === "GET" && path === "stats") return { agents: stats.agentStats() };
+    if (method === "GET" && path === "calls") return { inFlight: callsInFlight(), recent: recentCalls() };
     // The installer registers the provider itself: no Paseo client exists before the app opens.
     if (method === "GET" && path === "provider") return { id: PROVIDER_ID, entry: await providerEntry() };
     if (method === "POST" && path === "download-model") {
@@ -456,6 +463,7 @@ export default function contribute(server: PluginServerContext) {
       budgetOptions,
       gatewayUrl: `http://127.0.0.1:${GATEWAY_PORT}/v1`,
       gatewayError: gatewayError(),
+      callsInFlight: callsInFlight(),
       version: VERSION,
       update: await latestRelease(),
       agentBaseTokens: OMP_BASE_TOKENS,

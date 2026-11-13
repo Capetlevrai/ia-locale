@@ -48,6 +48,30 @@ export function engineKey(): string {
 }
 
 class Superseded extends Error {}
+
+/** Terminations in progress, one per process. */
+const dying = new WeakMap<ChildProcess, Promise<void>>();
+
+/**
+ * Stop a llama-server and wait until it is gone. Asked twice for the same process (a load
+ * replaced by another while it stops), both callers wait on the same termination: a second
+ * terminate on a process already exiting never returned, and the engine stayed "stopped"
+ * for good. Never waits more than 20 s.
+ */
+function terminate(proc: ChildProcess): Promise<void> {
+  if (proc.exitCode !== null) return Promise.resolve();
+  let pending = dying.get(proc);
+  if (!pending) {
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 20_000));
+    pending = Promise.race([terminateProcess(proc).then(() => exited, () => exited), exited, timeout]).then(() => {
+      // Still there after 20 s: take it down the hard way so its VRAM is freed.
+      if (proc.exitCode === null) proc.kill("SIGKILL");
+    });
+    dying.set(proc, pending);
+  }
+  return pending;
+}
 const status: EngineStatus = {
   state: "stopped",
   modelId: null,
@@ -399,7 +423,7 @@ async function launch(
     }
     if (child === proc) {
       child = null;
-      if (proc.exitCode === null) await terminateProcess(proc);
+      await terminate(proc);
     }
     return memoryFailure ? "memory" : "error";
   }
@@ -422,7 +446,7 @@ export function start(plan: EnginePlan): Promise<void> {
   const mine = ++generation;
   startingPlan = plan;
   // Cut the load in progress short: its process exits and it sees it was superseded.
-  if (previous && child && child.exitCode === null) void terminateProcess(child);
+  if (previous && child) void terminate(child);
   const run = (previous ?? Promise.resolve())
     .catch(() => {})
     .then(() => load(plan, mine))
@@ -552,7 +576,7 @@ export async function stop(keepError = false): Promise<void> {
     status.state = "stopped";
     status.error = null;
   }
-  if (proc && proc.exitCode === null) await terminateProcess(proc);
+  if (proc) await terminate(proc);
 }
 
 /** Loaded and not about to be replaced: a load in progress may still restart the engine. */

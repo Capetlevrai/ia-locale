@@ -96,6 +96,8 @@ export interface Status {
   gatewayUrl: string;
   /** Why agents cannot reach the engine (port taken by another program), or null. */
   gatewayError: string | null;
+  /** Model calls being served right now: a model swap waits for them. */
+  callsInFlight: number;
   /** Version of this plugin. */
   version: string;
   /** A newer installer exists. */
