@@ -409,6 +409,10 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
           <Text style={styles.muted}>
             Chaque outil coûte du contexte à chaque conversation. N'active que ce dont tu as besoin.
           </Text>
+          <Text style={styles.muted}>
+            Les deux navigateurs en même temps, ce n'est pas idéal : un modèle local choisit moins bien entre deux
+            outils qui se ressemblent. Garde-en un seul, le Navigateur (Playwright) pour l'usage courant.
+          </Text>
           {s.mcp.map((m) => (
             <SettingsSwitch
               key={m.id}

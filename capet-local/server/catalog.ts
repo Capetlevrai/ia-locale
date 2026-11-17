@@ -327,7 +327,7 @@ export const MCPS: CatalogMcp[] = [
   {
     id: "playwright",
     label: "Navigateur (Playwright)",
-    description: "Permet à l'agent d'ouvrir et tester des pages web.",
+    description: "Permet à l'agent d'ouvrir, tester des pages web et y télécharger des fichiers. Le navigateur conseillé.",
     tokens: 900,
     enabledByDefault: false,
     requires: "npx",
@@ -337,7 +337,7 @@ export const MCPS: CatalogMcp[] = [
   {
     id: "chrome-devtools",
     label: "Chrome DevTools",
-    description: "Inspecte une page dans Chrome : console, réseau, performances.",
+    description: "Inspecte une page dans Chrome : console, réseau, performances. Pour déboguer un site ; à ne pas cumuler avec Playwright.",
     tokens: 900,
     enabledByDefault: false,
     requires: "npx",

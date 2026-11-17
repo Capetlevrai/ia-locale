@@ -403,8 +403,26 @@ function rewrite(json: Record<string, unknown>, modelId: string): void {
   if (pending.length > 0) {
     out.push({ role: "user", content: pending.map((text) => `<system-reminder>\n${text}\n</system-reminder>`).join("\n") });
   }
+  // Standing advice, at the end of the system prompt (same text on every call: the engine's
+  // prompt cache is untouched).
+  const first = out[0];
+  if (first?.role === "system") first.content = appendText(first.content, DOWNLOAD_ADVICE);
   json.messages = out;
 }
+
+/**
+ * Local models fetch a "download" link with curl, get the site's web page instead of the
+ * file, and go on as if they had it (seen: twenty 46 KB HTML pages saved as a game file).
+ */
+const DOWNLOAD_ADVICE =
+  "<downloads>\n" +
+  "After every download, check what you got before using it: its size and its first bytes or type. " +
+  "A file of a few dozen KB that starts with <!doctype html> or <html is the site's web page, not the file.\n" +
+  "When that happens, do not retry the same address with the shell. Use a browser tool if you have one " +
+  "(open the page, find the real download link, click it), or look for a direct file address " +
+  "(for GitHub: raw.githubusercontent.com or a release asset). " +
+  "If neither works after two different attempts, stop and tell the user what blocks you.\n" +
+  "</downloads>";
 
 /** Sent in place of an image when the engine runs without its vision projector. */
 const NO_VISION =
@@ -438,6 +456,12 @@ function textOf(content: unknown): string {
       .join("\n");
   }
   return "";
+}
+
+function appendText(content: unknown, text: string): unknown {
+  if (typeof content === "string") return `${content}\n\n${text}`;
+  if (Array.isArray(content)) return [...content, { type: "text", text }];
+  return text;
 }
 
 function prependText(content: unknown, text: string): unknown {
