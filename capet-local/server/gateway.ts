@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { ENGINE_PORT, GATEWAY_PORT } from "./paths";
+import { NUDGE_AT, nudge, shouldStop, stopResponse, stopText, trailingRepeat } from "./loopguard";
 import { callStarted, callTimings, type CallHandle, type LlamaTimings } from "./stats";
 
 /**
@@ -161,6 +162,21 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
       // Not JSON after all: forward untouched.
     }
   }
+  // A model stuck repeating the same tool call: end the turn here, without the engine.
+  const repeat = json && Array.isArray(json.messages) ? trailingRepeat(json.messages) : null;
+  if (json && repeat && shouldStop(repeat)) {
+    const options = json.stream_options as { include_usage?: unknown } | undefined;
+    const answer = stopResponse(
+      stopText(repeat),
+      typeof json.model === "string" ? json.model : "local",
+      json.stream === true,
+      options?.include_usage === true,
+    );
+    note(req, typeof json.model === "string" ? json.model : null, `boucle arrêtée (${repeat.count} fois)`);
+    res.writeHead(200, { "content-type": answer.type, "cache-control": "no-cache" });
+    res.end(answer.body);
+    return;
+  }
   // The model the agent's picker is on. The engine holds one model: when the agent asks for
   // another downloaded one, it is loaded in its place, once the calls in flight are done
   // (they would be cut otherwise). Then hold the engine for this call.
@@ -216,6 +232,10 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
       // An agent keeps the sampling of the model it was opened with (OMP sends it on every
       // request): after a model switch, Qwen3.6 would run at Swift's temperature 1.0.
       if (Array.isArray(json.messages)) Object.assign(json, hooks.sampling());
+      // Repeating itself, not yet stopped: say so at the end of what the model reads.
+      if (repeat && repeat.count >= NUDGE_AT && Array.isArray(json.messages)) {
+        (json.messages as Message[]).push({ role: "user", content: nudge(repeat) });
+      }
       if (Array.isArray(json.messages)) fitReasoningEffort(json, hooks.efforts());
       if (Array.isArray(json.messages)) await capReasoning(json, hooks);
       isCompletion = Array.isArray(json.messages);

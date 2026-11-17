@@ -53,6 +53,8 @@ Détails, modèles proposés et dépannage : [LISEZMOI.txt](LISEZMOI.txt).
   Un modèle supprimé peut être retéléchargé.
 - **Streamer ou jouer en même temps** : mode « Budget VRAM » dans la page IA locale. Le budget
   s'ajuste tout seul si le modèle choisi en demande plus.
+- **Si l'agent tourne en rond** : quand il répète plusieurs fois la même action, le plugin le
+  prévient, puis arrête le tour et vous demande comment continuer.
 
 ## Mettre à jour, désinstaller
 
