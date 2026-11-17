@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { ENGINE_PORT, GATEWAY_PORT } from "./paths";
-import { NUDGE_AT, nudge, shouldStop, stopResponse, stopText, trailingRepeat } from "./loopguard";
+import { nudge, shouldNudge, shouldStop, stopResponse, stopText, trailingRepeat } from "./loopguard";
 import { callStarted, callTimings, type CallHandle, type LlamaTimings } from "./stats";
 
 /**
@@ -233,7 +233,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, hooks: GatewayH
       // request): after a model switch, Qwen3.6 would run at Swift's temperature 1.0.
       if (Array.isArray(json.messages)) Object.assign(json, hooks.sampling());
       // Repeating itself, not yet stopped: say so at the end of what the model reads.
-      if (repeat && repeat.count >= NUDGE_AT && Array.isArray(json.messages)) {
+      if (repeat && shouldNudge(repeat) && Array.isArray(json.messages)) {
         (json.messages as Message[]).push({ role: "user", content: nudge(repeat) });
       }
       if (Array.isArray(json.messages)) fitReasoningEffort(json, hooks.efforts());

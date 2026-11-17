@@ -16,9 +16,19 @@ export const STOP_AT = 6;
 /** Identical calls in a row before the turn is ended whatever the results (a poll changes its output). */
 export const STOP_ANYWAY_AT = 12;
 
+/**
+ * A stuck model often changes one number per try (page10.html, page11.html…): the calls
+ * differ, the loop is the same. Numbers are masked before comparing, in calls and results.
+ */
+function masked(text: string): string {
+  return text.replace(/[0-9]+/g, "#");
+}
+
 export interface Repeat {
-  /** How many times in a row the model sent the same tool calls, up to the end of the conversation. */
+  /** How many times in a row the model sent the same tool calls (numbers aside), up to the end of the conversation. */
   count: number;
+  /** Whether those calls were identical to the last digit. */
+  exact: boolean;
   /** Whether each of those runs returned the same result. */
   sameResults: boolean;
   /** The repeated call, shortened, to show the user. */
@@ -49,6 +59,8 @@ function label(msg: Message): string {
 export function trailingRepeat(messages: unknown[]): Repeat | null {
   let last: Message | null = null;
   let lastSignature: string | null = null;
+  let lastExact: string | null = null;
+  let exact = true;
   let count = 0;
   let sameResults = true;
   let results: string[] = [];
@@ -56,17 +68,20 @@ export function trailingRepeat(messages: unknown[]): Repeat | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i] as Message;
     if (msg?.role === "tool") {
-      results.unshift(JSON.stringify(msg.content ?? ""));
+      results.unshift(masked(JSON.stringify(msg.content ?? "")));
       continue;
     }
-    const sig = signature(msg);
-    if (sig === null) break;
+    const raw = signature(msg);
+    if (raw === null) break;
+    const sig = masked(raw);
     if (lastSignature === null) {
       // The conversation must end on the results of a call: the model is about to act again.
       if (results.length === 0) return null;
       lastSignature = sig;
+      lastExact = raw;
       last = msg;
     } else if (sig !== lastSignature) break;
+    if (raw !== lastExact) exact = false;
     const joined = results.join("\n");
     if (firstResults === null) firstResults = joined;
     else if (joined !== firstResults) sameResults = false;
@@ -74,19 +89,24 @@ export function trailingRepeat(messages: unknown[]): Repeat | null {
     count += 1;
   }
   if (!last || count === 0) return null;
-  return { count, sameResults, label: label(last) };
+  return { count, exact, sameResults, label: label(last) };
 }
 
 export function shouldStop(repeat: Repeat): boolean {
-  return repeat.count >= STOP_ANYWAY_AT || (repeat.sameResults && repeat.count >= STOP_AT);
+  return (repeat.exact && repeat.count >= STOP_ANYWAY_AT) || (repeat.sameResults && repeat.count >= STOP_AT);
+}
+
+/** Calls that differ by a number and return different things are progress (reading a file by chunks), not a loop. */
+export function shouldNudge(repeat: Repeat): boolean {
+  return repeat.count >= NUDGE_AT && (repeat.exact || repeat.sameResults);
 }
 
 /** Added at the end of the conversation the model sees, never stored by the agent. */
 export function nudge(repeat: Repeat): string {
   return (
     "<system-reminder>\n" +
-    `You have now sent the exact same tool call ${repeat.count} times in a row` +
-    (repeat.sameResults ? " and got the exact same result each time" : "") +
+    `You have now sent ${repeat.exact ? "the exact same tool call" : "the same tool call, changing only a number,"} ${repeat.count} times in a row` +
+    (repeat.sameResults ? " and got the same result each time" : "") +
     ". Sending it again will not change anything. Do NOT send it again. " +
     "Either take a genuinely different action (other tool, other arguments, other source), " +
     "or stop calling tools and tell the user in plain words what blocks you and what you need from them.\n" +
@@ -97,7 +117,7 @@ export function nudge(repeat: Repeat): string {
 /** What the user reads when the gateway ends the turn in the model's place. */
 export function stopText(repeat: Repeat): string {
   return (
-    `Je m'arrête : je viens de lancer ${repeat.count} fois de suite exactement la même action` +
+    `Je m'arrête : je viens de lancer ${repeat.count} fois de suite ${repeat.exact ? "exactement la même action" : "la même action, à un numéro près"}` +
     (repeat.sameResults ? ", avec le même résultat à chaque fois" : "") +
     `, et je tournais en rond.\n\nAction répétée : \`${repeat.label.replace(/`/g, "'")}\`\n\n` +
     "Dis-moi comment continuer : une autre piste, un fichier ou une adresse à utiliser, ou ce que tu veux que j'abandonne."
