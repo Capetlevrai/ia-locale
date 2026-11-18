@@ -4,8 +4,8 @@
 import type { GpuInfo } from "../shared/rpc";
 import type { Backend } from "../shared/settings";
 
-/** Windows: CUDA 12.4 / 13.4. Linux: CUDA 12.8 / 13.4. Vulkan on both. Metal on Apple Silicon Macs. */
-export type RuntimeVariant = "cuda-12.4" | "cuda-12.8" | "cuda-13.4" | "vulkan" | "metal";
+/** Windows: CUDA 12.4 / 13.5. Linux: CUDA 12.8 / 13.5. Vulkan on both. Metal on Apple Silicon Macs. */
+export type RuntimeVariant = "cuda-12.4" | "cuda-12.8" | "cuda-13.5" | "vulkan" | "metal";
 
 export interface HfFile {
   repo: string;
@@ -67,8 +67,13 @@ export interface CatalogMcp {
 }
 
 export const RUNTIME = {
-  /** llama.cpp v0.7.0. Previous: b10964 (v0.4.1). */
-  tag: "b11669",
+  /**
+   * llama.cpp of 2026-11-18 (after v1.0.0). Previous: b11669 (2026-10-15). Taken for its Vulkan
+   * work on AMD (RDNA3/RDNA4 kernels, host-memory fixes, a Windows driver workaround). On an
+   * RTX 4090 both builds measure the same. Vulkan with MTP: ~79 tok/s on code (56 without), ~50
+   * on short prose (56 without). CUDA with MTP: ~83 on prose, ~98 in an agent run.
+   */
+  tag: "b12503",
   repo: "ggml-org/llama.cpp",
   /**
    * CUDA on NVIDIA (Blackwell, compute 12.x, needs the CUDA 13 build), Vulkan on AMD and
@@ -79,7 +84,7 @@ export const RUNTIME = {
   variantFor(gpu: Pick<GpuInfo, "vendor" | "computeCap">, backend: Backend = "auto", platform: NodeJS.Platform = process.platform): RuntimeVariant {
     if (platform === "darwin") return "metal";
     if (backend === "vulkan" || gpu.vendor !== "nvidia") return "vulkan";
-    if (gpu.computeCap >= 12) return "cuda-13.4";
+    if (gpu.computeCap >= 12) return "cuda-13.5";
     return platform === "win32" ? "cuda-12.4" : "cuda-12.8";
   },
   /** Release archives: the engine, plus NVIDIA's CUDA libraries for the CUDA builds. */

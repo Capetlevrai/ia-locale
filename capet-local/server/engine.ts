@@ -3,11 +3,11 @@ import type { ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createWriteStream, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { cpus } from "node:os";
-import { dirname, join } from "node:path";
-import type { EngineStatus, GpuInfo } from "../shared/rpc";
+import { basename, dirname, join } from "node:path";
+import type { EngineStatus, GpuInfo, GpuVendor } from "../shared/rpc";
 import type { LocalSettings } from "../shared/settings";
 import type { CatalogModel, RuntimeVariant } from "./catalog";
-import { detectGpu, virtualMemory, vulkanDevice } from "./hardware";
+import { detectGpu, processGpuMemory, virtualMemory, vulkanCard } from "./hardware";
 import { ENGINE_PORT, IS_WINDOWS, paths } from "./paths";
 
 export interface EnginePlan {
@@ -99,7 +99,14 @@ export function modelPath(localName: string): string {
 }
 
 /** Resolve the user's choices against what the model and disk allow. */
-export function makePlan(model: CatalogModel, exe: string, variant: RuntimeVariant, settings: LocalSettings, revision: string): EnginePlan {
+export function makePlan(
+  model: CatalogModel,
+  exe: string,
+  variant: RuntimeVariant,
+  settings: LocalSettings,
+  revision: string,
+  gpuVendor: GpuVendor,
+): EnginePlan {
   const dflashReady = !!model.dflash && existsSync(modelPath(model.dflash.localName));
   let speculative: EnginePlan["speculative"];
   switch (settings.speculative) {
@@ -109,8 +116,15 @@ export function makePlan(model: CatalogModel, exe: string, variant: RuntimeVaria
     case "dflash":
       speculative = dflashReady ? "dflash" : model.mtp ? "mtp" : "none";
       break;
-    default:
+    case "mtp":
       speculative = model.mtp ? "mtp" : "none";
+      break;
+    default:
+      // Automatic. With MTP the Vulkan engine reallocates its compute buffer on the first
+      // request and an AMD driver then keeps it outside the card: 4x slower writing, 6x
+      // slower reading (llama.cpp #30688, RX 9070, still open at b12503). NVIDIA gains from
+      // MTP with Vulkan too (RTX 4090, code: 79 tok/s with it, 56 without).
+      speculative = model.mtp && !(variant === "vulkan" && gpuVendor === "amd") ? "mtp" : "none";
   }
   // DFlash drafts break on image inputs, so it always runs text-only.
   const vision = settings.vision && !!model.mmproj && speculative !== "dflash" && existsSync(modelPath(model.mmproj.localName));
@@ -345,14 +359,33 @@ function saveCalibration(key: string, adjustMiB: number): void {
 interface Pin {
   args: string[];
   env?: NodeJS.ProcessEnv;
+  /** Vulkan: calibration key set when the engine dies inside the graphics driver. */
+  crashKey?: string;
 }
+
+/** 0xC0000005: access violation. With Vulkan, a shader the graphics driver can't take. */
+const DRIVER_CRASH_CODE = 3221225477;
+/** Shared memory above this after loading: the driver kept part of the model off the card. */
+const SHARED_SPILL_MIB = 1536;
+/** Shared memory of the engine right after its last load (Windows, Vulkan), else null. */
+let sharedAfterLoadMiB: number | null = null;
 
 /** Keep the engine on the card detectGpu measured: the other cards stay invisible to it. */
 async function pinTo(plan: EnginePlan, gpu: GpuInfo | null): Promise<Pin> {
   if (!gpu) return { args: [] };
   if (plan.variant === "vulkan") {
-    const device = await vulkanDevice(plan.exe, gpu.name);
-    return { args: device ? ["--device", device] : [] };
+    const card = await vulkanCard(plan.exe, gpu.name);
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    // AMD and Intel drivers on Windows keep "host-visible" VRAM, which the engine asks for
+    // first, in shared memory: the whole model can end up there (llama.cpp #12748, #27097).
+    if (IS_WINDOWS && gpu.vendor !== "nvidia") env.GGML_VK_DISABLE_HOST_VISIBLE_VIDMEM = "1";
+    // Per engine build: the next llama.cpp gets its fast shaders back.
+    const crashKey = `${gpu.name}|${basename(dirname(plan.exe))}|sans-coopmat`;
+    if (storedAdjust(crashKey) > 0) env.GGML_VK_DISABLE_COOPMAT = "1";
+    // Alone in the engine's eyes, the card is its Vulkan0: an integrated chip listed first
+    // no longer holds the host buffers, and --fit reserves the vision on the right card.
+    if (card.visible !== null) return { args: [], env: { ...env, GGML_VK_VISIBLE_DEVICES: card.visible }, crashKey };
+    return { args: card.device ? ["--device", card.device] : [], env, crashKey };
   }
   if (gpu.vendor !== "nvidia" || gpu.index < 0) return { args: [] };
   // PCI_BUS_ID makes CUDA number the cards like nvidia-smi (by default the fastest comes first).
@@ -375,7 +408,10 @@ async function launch(
   const args = [...buildArgs(plan, marginMiB, offload), ...pin.args];
   const log = createWriteStream(join(paths.logs, "llama-server.log"), { flags: "w" });
   // The key stays out of the log, which users send along with their questions.
-  log.write(`"${plan.exe}" ${args.join(" ")}\n\n`);
+  log.write(`"${plan.exe}" ${args.join(" ")}\n`);
+  const pinned = Object.entries(pin.env ?? {}).filter(([name]) => /^(GGML_VK_|CUDA_VISIBLE_DEVICES$|CUDA_DEVICE_ORDER$)/.test(name));
+  log.write(`${pinned.map(([name, value]) => `${name}=${value}`).join(" ")}\n\n`);
+  sharedAfterLoadMiB = null;
   const proc = spawnProcess(plan.exe, [...args, "--api-key", ENGINE_KEY], {
     cwd: dirname(plan.exe),
     stdio: "pipe",
@@ -397,6 +433,7 @@ async function launch(
   proc.on("exit", (code) => {
     log.end();
     if (code !== null && MEMORY_EXIT_CODES.has(code)) memoryFailure = true;
+    if (code === DRIVER_CRASH_CODE && pin.crashKey) saveCalibration(pin.crashKey, 1);
     if (child !== proc) return;
     child = null;
     // Out of memory on a request: the calibrated margin was too tight for this PC.
@@ -414,6 +451,13 @@ async function launch(
     status.ctx = (await readContext()) ?? plan.ctx;
     const freeAfter = (await detectGpu())?.vramFreeMiB ?? null;
     status.vramUsedMiB = freeBefore !== null && freeAfter !== null ? freeBefore - freeAfter : null;
+    if (plan.variant === "vulkan" && proc.pid) {
+      const used = await processGpuMemory(proc.pid);
+      if (used) {
+        sharedAfterLoadMiB = used.sharedMiB;
+        log.write(`[capet-local] Mémoire après chargement : ${used.dedicatedMiB} Mio sur la carte, ${used.sharedMiB} Mio en mémoire partagée\n`);
+      }
+    }
     status.state = "ready";
     return "ok";
   } catch (error) {
@@ -525,7 +569,17 @@ function load(plan: EnginePlan, mine: number): Promise<void> {
       }
       if (outcome === "ok") {
         const leftover = calibrate && budgetMiB !== null && status.vramUsedMiB !== null ? budgetMiB - status.vramUsedMiB : 0;
-        if (!recalibrated && leftover >= CALIBRATE_MIN_MIB && adjustMiB + leftover - CALIBRATE_KEEP_MIB <= CALIBRATE_MAX_MIB) {
+        // Part of the model off the card looks like VRAM left unused: never calibrate on it.
+        const spilled = sharedAfterLoadMiB !== null && sharedAfterLoadMiB >= SHARED_SPILL_MIB;
+        if (spilled) {
+          status.notice =
+            `Le pilote graphique a placé ${((sharedAfterLoadMiB ?? 0) / 1024).toFixed(1)} Go du modèle hors de la mémoire de la carte : ` +
+            "les réponses seront très lentes. Fermer les applications qui utilisent la carte ou réduire le contexte dans IA locale peut aider.";
+        } else if (pin.env?.GGML_VK_DISABLE_COOPMAT && !status.notice) {
+          status.notice =
+            "Le pilote graphique a fait planter le moteur : il tourne en mode compatible, plus lent. Mettre à jour le pilote de la carte peut régler le problème.";
+        }
+        if (!recalibrated && !spilled && leftover >= CALIBRATE_MIN_MIB && adjustMiB + leftover - CALIBRATE_KEEP_MIB <= CALIBRATE_MAX_MIB) {
           recalibrated = true;
           adjustMiB += leftover - CALIBRATE_KEEP_MIB;
           saveCalibration(key, adjustMiB);

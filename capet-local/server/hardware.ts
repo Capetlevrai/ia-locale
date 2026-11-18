@@ -186,18 +186,56 @@ export async function detectAppleGpu(): Promise<GpuInfo | null> {
  * llama.cpp's name for a card in its Vulkan engine ("Vulkan1"), to pin it with --device.
  * Vulkan and DirectX name cards the same way, give or take (R)/(TM) marks.
  */
-export async function vulkanDevice(exe: string, gpuName: string): Promise<string | null> {
+export async function vulkanCard(exe: string, gpuName: string): Promise<{ visible: string | null; device: string | null }> {
   const norm = (s: string) => s.toLowerCase().replace(/\((r|tm)\)/g, "").replace(/\s+/g, " ").trim();
-  try {
-    const { stdout, stderr } = await execCommand(exe, ["--list-devices"], { timeout: 30_000 });
+  const list = async (env?: NodeJS.ProcessEnv) => {
+    const { stdout, stderr } = await execCommand(exe, ["--list-devices"], { timeout: 30_000, env });
+    const found: { device: string; name: string }[] = [];
     for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
       const match = /^\s*(Vulkan\d+):\s*(.+?)\s*\(\d+ MiB/.exec(line);
-      if (match && norm(match[2]) === norm(gpuName)) return match[1];
+      if (match) found.push({ device: match[1], name: match[2] });
     }
-  } catch {
+    return found;
+  };
+  try {
+    const all = await list();
+    const device = all.find((card) => norm(card.name) === norm(gpuName))?.device ?? null;
     // Unpinned: llama.cpp then uses every dedicated card.
+    if (!device) return { visible: null, device: null };
+    if (all.length === 1) return { visible: null, device };
+    // The index counts every Vulkan device of the PC, in the driver's order: try each.
+    for (let index = 0; index < 8; index++) {
+      try {
+        const only = await list({ ...process.env, GGML_VK_VISIBLE_DEVICES: String(index) });
+        if (only.length === 1 && norm(only[0].name) === norm(gpuName)) return { visible: String(index), device };
+      } catch {
+        // Past the last device.
+      }
+    }
+    return { visible: null, device };
+  } catch {
+    return { visible: null, device: null };
   }
-  return null;
+}
+
+/**
+ * Windows: where the driver really put what this process allocated on the cards. An AMD
+ * driver accepts an allocation it then keeps in system memory ("shared"), where the card
+ * reads it many times slower, and the engine never learns about it (llama.cpp #30888).
+ */
+export async function processGpuMemory(pid: number): Promise<{ dedicatedMiB: number; sharedMiB: number } | null> {
+  if (!IS_WINDOWS) return null;
+  const script =
+    `$r = Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory | Where-Object { $_.Name -like 'pid_${pid}_*' }; ` +
+    "if ($r) { '{0} {1}' -f (($r | Measure-Object DedicatedUsage -Sum).Sum), (($r | Measure-Object SharedUsage -Sum).Sum) }";
+  try {
+    const { stdout } = await execCommand("powershell.exe", ["-NoProfile", "-Command", script], { timeout: 20_000 });
+    const match = /^(\d+) (\d+)\s*$/m.exec(stdout);
+    if (!match) return null;
+    return { dedicatedMiB: Math.round(Number(match[1]) / 1048576), sharedMiB: Math.round(Number(match[2]) / 1048576) };
+  } catch {
+    return null;
+  }
 }
 
 /**

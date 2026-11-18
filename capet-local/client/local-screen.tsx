@@ -267,11 +267,11 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
             hint={
               values.speculative === "dflash"
                 ? "DFlash : environ +20 % de vitesse, mais l'agent ne voit plus les images."
-                : "MTP : le modèle devine plusieurs mots d'un coup. Plus rapide, même qualité."
+                : "MTP : le modèle devine plusieurs mots d'un coup. Plus rapide, même qualité. En automatique, il reste coupé sur les cartes AMD, qu'il ralentit pour l'instant."
             }
             value={values.speculative}
             options={[
-              { value: "auto", label: "Automatique (MTP)" },
+              { value: "auto", label: "Automatique" },
               { value: "none", label: "Aucune" },
               ...(selected.features.mtp ? [{ value: "mtp" as const, label: "MTP" }] : []),
               ...(selected.features.dflash ? [{ value: "dflash" as const, label: "DFlash (texte seulement)" }] : []),

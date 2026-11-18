@@ -54,7 +54,7 @@ export async function installRuntime(variant: RuntimeVariant): Promise<void> {
     mkdirSync(dir, { recursive: true });
     for (const file of files) {
       // Windows ships bsdtar, which reads the flat zip archives. The Linux and macOS
-      // archives keep everything in one top folder (llama-b11669/): drop it.
+      // archives keep everything in one top folder (llama-<tag>/): drop it.
       // Full path: with Git's Unix tools first in PATH, "tar.exe" is GNU tar, which reads
       // "C:\..." as a remote host ("Cannot connect to C: resolve failed").
       if (IS_WINDOWS) await execCommand(WINDOWS_TAR, ["-xf", file.dest, "-C", dir], { timeout: 300_000 });
@@ -68,5 +68,15 @@ export async function installRuntime(variant: RuntimeVariant): Promise<void> {
     // A quarantine mark (copied by hand from a browser download) blocks unsigned binaries.
     if (IS_MAC) await execCommand("xattr", ["-dr", "com.apple.quarantine", dir], { timeout: 30_000 }).catch(() => {});
     rmSync(staging, { recursive: true, force: true });
+    // An engine of another llama.cpp version is never used again: about 1 GB each. One still
+    // running (Windows locks its files) stays until the next engine install.
+    for (const entry of readdirSync(paths.runtime)) {
+      if (entry.startsWith(`${RUNTIME.tag}-`)) continue;
+      try {
+        rmSync(join(paths.runtime, entry), { recursive: true, force: true });
+      } catch {
+        // Only disk space.
+      }
+    }
   });
 }

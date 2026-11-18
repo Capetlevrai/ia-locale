@@ -132,7 +132,7 @@ export default function contribute(server: PluginServerContext) {
     const variant = RUNTIME.variantFor(card, values.backend);
     const exe = findServerExe(variant);
     if (!exe) throw new Error("Le moteur llama.cpp n'est pas installé");
-    const next = engine.makePlan(model, exe, variant, values, revision);
+    const next = engine.makePlan(model, exe, variant, values, revision, card.vendor);
     if (next.budgetMiB !== null) {
       const min = engine.minBudgetMiB(model, engine.visionOnGpu(next), next.speculative === "dflash");
       if (next.budgetMiB < min) {
