@@ -53,6 +53,46 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # Version a >= b (dotted numbers).
 version_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" = "$2" ]; }
 gateway_up() { curl -fsS -m 10 "$GATEWAY/capet/status" >/dev/null 2>&1; }
+# Shared libraries a program needs that this system lacks (Linux), on one line.
+missing_libs() {
+  LD_LIBRARY_PATH="$(dirname "$1")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ldd "$1" 2>/dev/null | awk '/not found/ {print $1}' | sort -u | tr '\n' ' '
+}
+# The command that installs those libraries with this distribution's package manager,
+# or nothing when none of them is known. A minimal or server install (seen: a fresh
+# Ubuntu 24.04) lacks what a desktop always has, and nothing here runs as root.
+libs_command() {
+  local lib pkgs="" tool=""
+  for lib in "$@"; do
+    case "$lib" in
+      libnss3.so|libnssutil3.so|libsmime3.so|libnspr4.so)
+        if have apt-get; then pkgs="$pkgs libnss3"; elif have zypper; then pkgs="$pkgs mozilla-nss"; else pkgs="$pkgs nss"; fi ;;
+      libasound.so.2)
+        if have apt-get; then
+          if apt-cache show libasound2t64 >/dev/null 2>&1; then pkgs="$pkgs libasound2t64"; else pkgs="$pkgs libasound2"; fi
+        elif have zypper; then pkgs="$pkgs libasound2"; else pkgs="$pkgs alsa-lib"; fi ;;
+      libgomp.so.1)
+        if have pacman; then pkgs="$pkgs gcc-libs"; elif have dnf; then pkgs="$pkgs libgomp"; else pkgs="$pkgs libgomp1"; fi ;;
+    esac
+  done
+  [ -n "$pkgs" ] || return 0
+  if have apt-get; then tool="sudo apt install"
+  elif have dnf; then tool="sudo dnf install"
+  elif have pacman; then tool="sudo pacman -S"
+  elif have zypper; then tool="sudo zypper install"
+  else return 0; fi
+  # shellcheck disable=SC2086
+  echo "$tool $(printf '%s\n' $pkgs | sort -u | tr '\n' ' ' | sed 's/ $//')"
+}
+# Stops with the missing libraries and how to install them. $1: what needs them.
+fail_missing_libs() {
+  local what="$1" cmd; shift
+  cmd="$(libs_command "$@")"
+  if [ -n "$cmd" ]; then
+    fail "Il manque des bibliothèques système pour $what : $*. Installe-les avec « $cmd », puis relance l'installation."
+  else
+    fail "Il manque des bibliothèques système pour $what : $*. Installe-les avec le gestionnaire de paquets de ta distribution, puis relance l'installation."
+  fi
+}
 
 OS="$(uname -s)"
 ARCH="$(uname -m)"
@@ -175,7 +215,17 @@ EOF
   rm -rf "$TMP"
   PASEO="$(find_paseo)" || fail "Paseo ne s'est pas installé. Installe-le depuis https://paseo.sh puis relance l'installation."
 fi
-ok "Paseo $("$PASEO" --version 2>/dev/null | tail -n1)"
+# Paseo is an Electron app: on a minimal Linux it is unpacked fine but cannot start for
+# want of a system library. Say which one now, rather than "OK" then a five-minute wait.
+PASEO_VERSION="$("$PASEO" --version 2>/dev/null | tail -n1)"
+if [ -z "$PASEO_VERSION" ] && [ "$MAC" = 0 ]; then
+  PASEO_BIN="$(dirname "$(readlink -f "$PASEO")")/../../Paseo.bin"
+  LIBS="$(missing_libs "$PASEO_BIN")"
+  # shellcheck disable=SC2086
+  [ -n "$LIBS" ] && fail_missing_libs "Paseo" $LIBS
+fi
+[ -n "$PASEO_VERSION" ] || fail "Paseo est installé mais ne démarre pas. Lance « $PASEO --version » dans un terminal pour voir l'erreur."
+ok "Paseo $PASEO_VERSION"
 CONFIG="$HOME/.paseo/config.json"
 if [ ! -f "$CONFIG" ]; then
   echo "  Première configuration de Paseo..."
@@ -229,6 +279,15 @@ else
   fi
 fi
 [ "$VRAM_GB" -lt 8 ] && warn "Moins de 8 Go utilisables : aucun modèle n'est conseillé pour cette machine."
+
+# The llama.cpp engine for Linux needs the GNU OpenMP runtime. Checked here, before the
+# engine and 10 to 19 GB of model are downloaded: without it the engine exits with code 127.
+if [ "$MAC" = 0 ]; then
+  LDCACHE="$( { ldconfig -p || /sbin/ldconfig -p; } 2>/dev/null)"
+  if [ -n "$LDCACHE" ] && ! printf '%s\n' "$LDCACHE" | grep -q 'libgomp\.so\.1'; then
+    fail_missing_libs "le moteur llama.cpp" libgomp.so.1
+  fi
+fi
 
 # --- 3. Mémoire et dossier des données ----------------------------------------
 step 3 "Mémoire et dossier des données"

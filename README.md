@@ -31,6 +31,8 @@ complémentaires » puis « Exécuter quand même ».
   (24 Go de mémoire minimum, 36 Go pour les modèles « 24 Go »).
 - Cartes AMD (Windows et Linux), Intel Arc (Windows seulement) et Mac : prise en charge **expérimentale**.
 - 16 Go de RAM minimum, 32 Go conseillés ; 25 Go d'espace disque libre (le modèle pèse de 11 à 19 Go).
+- Sur un Linux minimal, l'installateur indique les bibliothèques système à installer
+  (libnss3, libasound2, libgomp1 sur Ubuntu).
 
 | Système | Carte | État |
 |---|---|---|

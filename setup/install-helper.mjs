@@ -140,7 +140,11 @@ async function modelStep(cli, config, settingsFile) {
   } catch (error) {
     fail(`Le modèle ne s'est pas chargé : ${error.message}`);
   }
-  if (e.state !== "ready") fail(`Le modèle ne s'est pas chargé : ${e.error} (journal : logs/llama-server.log)`);
+  if (e.state !== "ready") {
+    // The engine's own last words say more than its exit code (a missing library, for one).
+    const last = (e.logTail ?? []).map((line) => String(line).trim()).filter(Boolean).at(-1);
+    fail(`Le modèle ne s'est pas chargé : ${e.error}${last ? ` : ${last}` : ""} (journal : logs/llama-server.log)`);
+  }
   ok(`Modèle chargé : ${Math.round(e.ctx / 1024)}K de contexte, ${e.vision ? "avec la vision" : "sans la vision"}`);
   if (e.notice) warn(e.notice);
 

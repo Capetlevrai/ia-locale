@@ -56,6 +56,10 @@ static class Setup
         string powershell = Path.Combine(Environment.SystemDirectory, @"WindowsPowerShell\v1.0\powershell.exe");
         ProcessStartInfo start = new ProcessStartInfo(powershell, line.ToString());
         start.UseShellExecute = false;
+        // Started from a PowerShell 7 window, the installer would hand its PSModulePath to
+        // Windows PowerShell, which then loses part of its own commands. Without the
+        // variable, Windows PowerShell rebuilds its default path.
+        start.EnvironmentVariables.Remove("PSModulePath");
         using (Process p = Process.Start(start))
         {
             p.WaitForExit();

@@ -106,10 +106,13 @@ if (-not $paseo) {
   & curl.exe -L --fail --retry 10 --retry-all-errors --retry-delay 5 -C - --progress-bar -o $setup "$feed/$file"
   if ($LASTEXITCODE -ne 0) { Fail "Téléchargement de Paseo impossible (curl $LASTEXITCODE)." }
   if ($sha) {
-    $hex = (Get-FileHash -Algorithm SHA512 $setup).Hash
-    $bytes = [byte[]]::new($hex.Length / 2)
-    for ($i = 0; $i -lt $bytes.Length; $i++) { $bytes[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
-    if ([Convert]::ToBase64String($bytes) -ne $sha) { Remove-Item $setup; Fail "Le fichier de Paseo téléchargé est abîmé : relance l'installation." }
+    # .NET, not Get-FileHash: that cmdlet is a script function of Windows PowerShell, and it
+    # vanishes when the installer is started from a PowerShell 7 window (its PSModulePath is
+    # inherited and hides the module). A first install then stopped right here.
+    $algo = [Security.Cryptography.SHA512]::Create()
+    $stream = [IO.File]::OpenRead($setup)
+    try { $digest = [Convert]::ToBase64String($algo.ComputeHash($stream)) } finally { $stream.Dispose(); $algo.Dispose() }
+    if ($digest -ne $sha) { Remove-Item $setup; Fail "Le fichier de Paseo téléchargé est abîmé : relance l'installation." }
   }
   Write-Host "  Installation de Paseo..."
   Start-Process $setup -ArgumentList "/S" -Wait
