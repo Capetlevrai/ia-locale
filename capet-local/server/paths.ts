@@ -42,6 +42,8 @@ export const paths = {
   state: join(base, "state.json"),
   /** VRAM --fit left unused per GPU + model, given back on the next start. */
   calibration: join(base, "calibration.json"),
+  /** Tests: while this file exists, the ROCm engine is offered on any Windows PC and runs on its CPU. */
+  rocmTest: join(base, "rocm-test"),
 };
 
 for (const dir of [paths.runtime, paths.models, paths.omp, paths.logs]) {

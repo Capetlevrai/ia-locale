@@ -1,7 +1,7 @@
 import { execCommand } from "@getpaseo/plugin/server";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { RUNTIME, type RuntimeVariant } from "./catalog";
+import { isRocm, ROCM, RUNTIME, type RuntimeVariant } from "./catalog";
 import { jobProgress, startJob } from "./download";
 import { EXE, IS_MAC, IS_WINDOWS, paths } from "./paths";
 
@@ -9,11 +9,17 @@ const JOB_KEY = "runtime";
 const SERVER = `llama-server${EXE}`;
 const WINDOWS_TAR = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
 
+/** Where the engine of this variant is published. */
+function source(variant: RuntimeVariant): { repo: string; tag: string } {
+  return isRocm(variant) ? ROCM : RUNTIME;
+}
+
 function runtimeDir(variant: RuntimeVariant): string {
-  return join(paths.runtime, `${RUNTIME.tag}-${variant}`);
+  return join(paths.runtime, `${source(variant).tag}-${variant}`);
 }
 
 export function runtimeLabel(variant: RuntimeVariant): string {
+  if (isRocm(variant)) return `llama.cpp ROCm ${ROCM.tag} (AMD)`;
   return `llama.cpp ${RUNTIME.tag} (${variant.toUpperCase()})`;
 }
 
@@ -28,9 +34,9 @@ export function runtimeDownload() {
 }
 
 /** Asset sizes from the GitHub release, so progress covers both archives from the start. */
-async function assetSizes(): Promise<Map<string, number>> {
+async function assetSizes(repo: string, tag: string): Promise<Map<string, number>> {
   try {
-    const res = await fetch(`https://api.github.com/repos/${RUNTIME.repo}/releases/tags/${RUNTIME.tag}`);
+    const res = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`);
     const release = (await res.json()) as { assets?: { name: string; size: number }[] };
     return new Map((release.assets ?? []).map((a) => [a.name, a.size]));
   } catch {
@@ -42,11 +48,14 @@ export async function installRuntime(variant: RuntimeVariant): Promise<void> {
   const dir = runtimeDir(variant);
   const staging = join(paths.runtime, "_download");
   mkdirSync(staging, { recursive: true });
-  const sizes = await assetSizes();
+  const { repo, tag } = source(variant);
+  const sizes = await assetSizes(repo, tag);
   const files = RUNTIME.assets(variant).map((name) => ({
-    url: `https://github.com/${RUNTIME.repo}/releases/download/${RUNTIME.tag}/${name}`,
+    url: `https://github.com/${repo}/releases/download/${tag}/${name}`,
     dest: join(staging, name),
     size: sizes.get(name),
+    // A third-party build: only the archive this version was checked with.
+    sha256: isRocm(variant) ? ROCM.families[ROCM.family(variant)].sha256 : undefined,
   }));
 
   return startJob(JOB_KEY, "Moteur llama.cpp", files, async () => {
@@ -71,7 +80,7 @@ export async function installRuntime(variant: RuntimeVariant): Promise<void> {
     // An engine of another llama.cpp version is never used again: about 1 GB each. One still
     // running (Windows locks its files) stays until the next engine install.
     for (const entry of readdirSync(paths.runtime)) {
-      if (entry.startsWith(`${RUNTIME.tag}-`)) continue;
+      if (entry.startsWith(`${RUNTIME.tag}-`) || entry.startsWith(`${ROCM.tag}-`)) continue;
       try {
         rmSync(join(paths.runtime, entry), { recursive: true, force: true });
       } catch {

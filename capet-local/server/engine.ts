@@ -6,8 +6,8 @@ import { cpus } from "node:os";
 import { basename, dirname, join } from "node:path";
 import type { EngineStatus, GpuInfo, GpuVendor } from "../shared/rpc";
 import type { LocalSettings } from "../shared/settings";
-import type { CatalogModel, RuntimeVariant } from "./catalog";
-import { detectGpu, processGpuMemory, virtualMemory, vulkanCard } from "./hardware";
+import { isRocm, type CatalogModel, type RuntimeVariant } from "./catalog";
+import { detectGpu, processGpuMemory, rocmCard, virtualMemory, vulkanCard } from "./hardware";
 import { ENGINE_PORT, IS_WINDOWS, paths } from "./paths";
 
 export interface EnginePlan {
@@ -25,6 +25,8 @@ export interface EnginePlan {
   revision: string;
   /** Sampling temperature: user override or the model's recommended value. */
   temperature: number;
+  /** Shown with the engine status: why this is not the engine that was asked for. */
+  notice?: string;
 }
 
 const LOG_LINES = 40;
@@ -120,11 +122,14 @@ export function makePlan(
       speculative = model.mtp ? "mtp" : "none";
       break;
     default:
-      // Automatic. With MTP the Vulkan engine reallocates its compute buffer on the first
-      // request and an AMD driver then keeps it outside the card: 4x slower writing, 6x
-      // slower reading (llama.cpp #30688, RX 9070, still open at b12503). NVIDIA gains from
-      // MTP with Vulkan too (RTX 4090, code: 79 tok/s with it, 56 without).
-      speculative = model.mtp && !(variant === "vulkan" && gpuVendor === "amd") ? "mtp" : "none";
+      // Automatic: no MTP on AMD cards. Vulkan reallocates its compute buffer on the first
+      // request and the driver can keep it outside the card (llama.cpp #30688). With ROCm,
+      // same model and driver, MTP writes faster (16 -> 21 tok/s) but reads prompts 4x
+      // slower (524 -> 136, #31495): a loss on an agent's long prompts. A tester's
+      // RX 9070 XT wrote faster with it under Vulkan (6.3 against 4.9 tok/s) while part of
+      // the model sat in shared memory: to measure again on a healthy setup. NVIDIA gains
+      // from MTP with Vulkan too (RTX 4090, code: 79 tok/s with it, 56 without).
+      speculative = model.mtp && gpuVendor !== "amd" ? "mtp" : "none";
   }
   // DFlash drafts break on image inputs, so it always runs text-only.
   const vision = settings.vision && !!model.mmproj && speculative !== "dflash" && existsSync(modelPath(model.mmproj.localName));
@@ -328,7 +333,7 @@ export function visionOnGpu(plan: Pick<EnginePlan, "vision" | "visionOnCpu">): b
 
 function calibrationKey(plan: EnginePlan, gpuName: string): string {
   // --fit misses by a different amount on each engine (CUDA keys predate Vulkan).
-  const engine = plan.variant === "vulkan" ? ["vulkan"] : [];
+  const engine = plan.variant === "vulkan" ? ["vulkan"] : isRocm(plan.variant) ? ["rocm"] : [];
   return [gpuName, plan.model.id, visionOnGpu(plan) ? "vision" : "texte", plan.speculative, ...engine].join("|");
 }
 
@@ -367,12 +372,29 @@ interface Pin {
 const DRIVER_CRASH_CODE = 3221225477;
 /** Shared memory above this after loading: the driver kept part of the model off the card. */
 const SHARED_SPILL_MIB = 1536;
-/** Shared memory of the engine right after its last load (Windows, Vulkan), else null. */
+/** Shared memory of the engine right after its last load (Windows, Vulkan or ROCm), else null. */
 let sharedAfterLoadMiB: number | null = null;
+/** Any model of the catalog puts far more than this on the card. */
+const ROCM_MIN_ON_CARD_MIB = 2048;
+/** ROCm engines that died by themselves or stayed on the CPU since Paseo started: Vulkan serves until the next start. */
+const rocmDead = new Set<string>();
+
+export function rocmFailed(exe: string): boolean {
+  return rocmDead.has(exe);
+}
 
 /** Keep the engine on the card detectGpu measured: the other cards stay invisible to it. */
 async function pinTo(plan: EnginePlan, gpu: GpuInfo | null): Promise<Pin> {
   if (!gpu) return { args: [] };
+  if (isRocm(plan.variant)) {
+    // The caller already checked that ROCm reaches this card. One card, no split:
+    // HIP gives wrong output across two different chips (llama.cpp #28676).
+    const card = await rocmCard(plan.exe, gpu.name);
+    if (!card) return { args: [] };
+    if (card.device === "none") return { args: ["--device", "none"] };
+    const args = ["--device", card.device, "-sm", "none", "-mg", "0"];
+    return card.visible === null ? { args } : { args, env: { ...process.env, HIP_VISIBLE_DEVICES: card.visible } };
+  }
   if (plan.variant === "vulkan") {
     const card = await vulkanCard(plan.exe, gpu.name);
     const env: NodeJS.ProcessEnv = { ...process.env };
@@ -409,7 +431,7 @@ async function launch(
   const log = createWriteStream(join(paths.logs, "llama-server.log"), { flags: "w" });
   // The key stays out of the log, which users send along with their questions.
   log.write(`"${plan.exe}" ${args.join(" ")}\n`);
-  const pinned = Object.entries(pin.env ?? {}).filter(([name]) => /^(GGML_VK_|CUDA_VISIBLE_DEVICES$|CUDA_DEVICE_ORDER$)/.test(name));
+  const pinned = Object.entries(pin.env ?? {}).filter(([name]) => /^(GGML_VK_|CUDA_VISIBLE_DEVICES$|CUDA_DEVICE_ORDER$|HIP_VISIBLE_DEVICES$)/.test(name));
   log.write(`${pinned.map(([name, value]) => `${name}=${value}`).join(" ")}\n\n`);
   sharedAfterLoadMiB = null;
   const proc = spawnProcess(plan.exe, [...args, "--api-key", ENGINE_KEY], {
@@ -436,6 +458,8 @@ async function launch(
     if (code === DRIVER_CRASH_CODE && pin.crashKey) saveCalibration(pin.crashKey, 1);
     if (child !== proc) return;
     child = null;
+    // Died without being asked to, and not for lack of memory: this ROCm build and this PC don't get along.
+    if (isRocm(plan.variant) && !memoryFailure) rocmDead.add(plan.exe);
     // Out of memory on a request: the calibrated margin was too tight for this PC.
     if (status.state === "ready" && memoryFailure && calibrationKey) saveCalibration(calibrationKey, 0);
     // Cut short for another load: that one owns the status now, this is not an error.
@@ -451,11 +475,16 @@ async function launch(
     status.ctx = (await readContext()) ?? plan.ctx;
     const freeAfter = (await detectGpu())?.vramFreeMiB ?? null;
     status.vramUsedMiB = freeBefore !== null && freeAfter !== null ? freeBefore - freeAfter : null;
-    if (plan.variant === "vulkan" && proc.pid) {
+    if ((plan.variant === "vulkan" || isRocm(plan.variant)) && proc.pid) {
       const used = await processGpuMemory(proc.pid);
       if (used) {
         sharedAfterLoadMiB = used.sharedMiB;
         log.write(`[capet-local] Mémoire après chargement : ${used.dedicatedMiB} Mio sur la carte, ${used.sharedMiB} Mio en mémoire partagée\n`);
+        // ROCm that put next to nothing on the card runs on the CPU, and says so nowhere.
+        if (isRocm(plan.variant) && used.dedicatedMiB < ROCM_MIN_ON_CARD_MIB && !pin.args.includes("none")) {
+          rocmDead.add(plan.exe);
+          throw new Error("Le moteur ROCm n'a rien chargé sur la carte graphique");
+        }
       }
     }
     status.state = "ready";
@@ -519,7 +548,7 @@ function load(plan: EnginePlan, mine: number): Promise<void> {
       vision: plan.vision,
       vramBudgetMiB: plan.budgetMiB,
       vramUsedMiB: null,
-      notice: null,
+      notice: plan.notice ?? null,
       error: null,
       logTail: [],
       appliedRevision: plan.revision,

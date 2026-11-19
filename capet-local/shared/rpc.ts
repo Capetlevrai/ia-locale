@@ -19,6 +19,8 @@ export interface GpuInfo {
   vramFreeMiB: number;
   /** CUDA compute capability, 0 for other vendors. */
   computeCap: number;
+  /** PCI device id of the chip (0x7550 for an RX 9070 XT), 0 when unknown. */
+  deviceId: number;
 }
 
 export interface Progress {
@@ -92,7 +94,11 @@ export interface EngineStatus {
 export interface Status {
   gpu: GpuInfo | null;
   /** sizeMb: download size of the engine build for this card. */
-  runtime: { installed: boolean; label: string; sizeMb: number; download: Progress | null };
+  /**
+   * rocm: what AMD's ROCm engine is for this card. "default": what automatic picks.
+   * "option": covered, but Vulkan is the automatic choice. null: not covered.
+   */
+  runtime: { installed: boolean; label: string; sizeMb: number; download: Progress | null; rocm: "default" | "option" | null };
   omp: { installed: boolean; version: string | null };
   node: boolean;
   models: ModelStatus[];

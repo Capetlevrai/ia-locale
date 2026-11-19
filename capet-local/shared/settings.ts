@@ -4,8 +4,12 @@ import { z } from "zod";
 export const SpeculativeSchema = z.enum(["auto", "none", "mtp", "dflash"]);
 export type Speculative = z.infer<typeof SpeculativeSchema>;
 
-/** auto: CUDA on NVIDIA, Vulkan on AMD and Intel. vulkan: Vulkan everywhere (tests, or a CUDA engine that fails). */
-export const BackendSchema = z.enum(["auto", "vulkan"]);
+/**
+ * auto: CUDA on NVIDIA, ROCm on Radeon RX 9000 cards under Windows, Vulkan on the other AMD
+ * cards and on Intel. rocm: ROCm on every AMD card it covers (RX 7000 and 6000 too).
+ * vulkan: Vulkan everywhere (an engine that fails, or tests).
+ */
+export const BackendSchema = z.enum(["auto", "vulkan", "rocm"]);
 export type Backend = z.infer<typeof BackendSchema>;
 
 export const LocalSettingsSchema = z.object({

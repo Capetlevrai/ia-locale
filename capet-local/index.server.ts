@@ -14,13 +14,13 @@ import {
   type ModelTier,
   type Status,
 } from "./shared/rpc";
-import { localSettings, LocalSettingsSchema, type LocalSettings } from "./shared/settings";
-import { findModel, MCPS, MODELS, OMP_BASE_TOKENS, RUNTIME, type CatalogModel, type RuntimeVariant } from "./server/catalog";
+import { localSettings, LocalSettingsSchema, type Backend, type LocalSettings } from "./shared/settings";
+import { findModel, isRocm, MCPS, MODELS, OMP_BASE_TOKENS, ROCM, RUNTIME, type CatalogModel, type RuntimeVariant } from "./server/catalog";
 import { cancelJob, diskFree, diskSpaceProblem, hfUrl, isRunning, jobProgress, startJob } from "./server/download";
 import * as engine from "./server/engine";
 import { callsInFlight, gatewayError, recentCalls, startGateway, stopGateway } from "./server/gateway";
 import * as stats from "./server/stats";
-import { detectGpu, findOmp, hasNpx, ompVersion } from "./server/hardware";
+import { detectGpu, findOmp, hasNpx, ompVersion, rocmCard } from "./server/hardware";
 import { LOCAL_MODEL_ID, OMP_CLOUD_KEYS, OMP_CONFIG, writeOmpConfig } from "./server/omp";
 import { GATEWAY_PORT, paths, PROVIDER_ID } from "./server/paths";
 import { findServerExe, installRuntime, runtimeDownload, runtimeLabel } from "./server/runtime";
@@ -69,6 +69,52 @@ export default function contribute(server: PluginServerContext) {
     return RUNTIME.variantFor(card, (await readSettings()).values.backend);
   }
 
+  /**
+   * `wanted`: the engine for this card. `variant`: the one that will really serve. They
+   * differ when ROCm is wanted but can't serve here (not installed yet, it does not see the
+   * card, or it died since Paseo started): Vulkan takes over, with the reason.
+   */
+  async function engineVariant(card: GpuInfo, backend: Backend): Promise<{ variant: RuntimeVariant; wanted: RuntimeVariant; notice?: string }> {
+    const wanted = RUNTIME.variantFor(card, backend);
+    if (!isRocm(wanted)) return { variant: wanted, wanted };
+    const exe = findServerExe(wanted);
+    const vulkan = !!findServerExe("vulkan");
+    if (!exe) {
+      if (!vulkan) return { variant: wanted, wanted };
+      return {
+        variant: "vulkan",
+        wanted,
+        notice: "Le moteur ROCm d'AMD, plus rapide sur cette carte, n'est pas encore installé : Vulkan sert en attendant. Pour l'installer : « Moteur d'IA », plus haut dans IA locale.",
+      };
+    }
+    if (engine.rocmFailed(exe)) {
+      return {
+        variant: "vulkan",
+        wanted,
+        notice: "Le moteur ROCm s'est arrêté ou n'a pas utilisé la carte sur cette machine : l'IA locale est revenue au moteur Vulkan. ROCm sera réessayé au prochain démarrage de Paseo.",
+      };
+    }
+    if (!(await rocmCard(exe, card.name))) {
+      return {
+        variant: "vulkan",
+        wanted,
+        notice: "Le moteur ROCm ne voit pas cette carte, ou ne peut pas l'isoler du circuit graphique intégré (pilote AMD à mettre à jour ?) : l'IA locale utilise le moteur Vulkan.",
+      };
+    }
+    return { variant: wanted, wanted };
+  }
+
+  /** The engine for this card, and Vulkan with ROCm: it takes over when ROCm can't serve. */
+  async function installEngines(card: GpuInfo): Promise<RuntimeVariant> {
+    const wanted = await runtimeVariant(card);
+    if (isRocm(wanted) && !findServerExe("vulkan")) await installRuntime("vulkan");
+    await installRuntime(wanted);
+    // Vulkan was serving while ROCm downloaded: unload it, so the next call loads the engine
+    // that is now installed instead of staying on Vulkan under a ROCm label.
+    const loaded = engine.currentPlan();
+    if (loaded && engine.isReady() && loaded.variant !== (await engineVariant(card, (await readSettings()).values.backend)).variant) await engine.stop();
+    return wanted;
+  }
   // Short enough for the sidebar's live VRAM meter, which polls the status.
   let gpuCache: { at: number; gpu: GpuInfo | null } | null = null;
   async function gpu(): Promise<GpuInfo | null> {
@@ -129,10 +175,10 @@ export default function contribute(server: PluginServerContext) {
     if (!modelInstalled(model)) throw new Error(`${model.label} n'est pas téléchargé`);
     const card = await gpu();
     if (!card) throw new Error(NO_GPU);
-    const variant = RUNTIME.variantFor(card, values.backend);
+    const { variant, notice } = await engineVariant(card, values.backend);
     const exe = findServerExe(variant);
     if (!exe) throw new Error("Le moteur llama.cpp n'est pas installé");
-    const next = engine.makePlan(model, exe, variant, values, revision, card.vendor);
+    const next = { ...engine.makePlan(model, exe, variant, values, revision, card.vendor), notice };
     if (next.budgetMiB !== null) {
       const min = engine.minBudgetMiB(model, engine.visionOnGpu(next), next.speculative === "dflash");
       if (next.budgetMiB < min) {
@@ -249,15 +295,28 @@ export default function contribute(server: PluginServerContext) {
    * chosen, whatever name an agent sends (agents opened by older versions send a model id).
    * Returns the id of the model that serves.
    */
+  /** Load `next`; when its engine dies while loading and another one takes over (ROCm -> Vulkan), load that one. */
+  async function startOrFallBack(next: engine.EnginePlan, replan: () => Promise<engine.EnginePlan>): Promise<engine.EnginePlan> {
+    try {
+      await engine.start(next);
+      return next;
+    } catch (error) {
+      const other = await replan();
+      if (other.variant === next.variant) throw error;
+      await engine.start(other);
+      return other;
+    }
+  }
+
   async function ensureEngine(_requested: string | null = null, _idle?: () => boolean, gone: () => boolean = () => false): Promise<string> {
     const loaded = engine.currentPlan();
     if (engine.isReady() && loaded) return loaded.model.id;
     const next = await plan();
     // The agent gave up while waiting: don't load a model for a call nobody reads.
     if (gone()) return next.model.id;
-    await engine.start(next);
-    await syncAgentConfig(next);
-    return next.model.id;
+    const served = await startOrFallBack(next, () => plan());
+    await syncAgentConfig(served);
+    return served.model.id;
   }
 
   /** The "IA locale" entry of Paseo's agents.providers (also written by install.ps1). */
@@ -317,8 +376,7 @@ export default function contribute(server: PluginServerContext) {
     if (method === "POST" && path === "install-runtime") {
       const card = await gpu();
       if (!card) throw new Error(NO_GPU);
-      const variant = await runtimeVariant(card);
-      await installRuntime(variant);
+      const variant = await installEngines(card);
       return { installed: !!findServerExe(variant), download: runtimeDownload() };
     }
     if (method === "POST" && path === "stop") {
@@ -330,9 +388,9 @@ export default function contribute(server: PluginServerContext) {
       const sent = body && typeof body === "object" ? Object.keys(body) : [];
       const parsed = LocalSettingsSchema.partial().parse(body);
       const overrides = Object.fromEntries(Object.entries(parsed).filter(([key]) => sent.includes(key))) as Partial<LocalSettings>;
-      const next = await plan(overrides);
+      let next = await plan(overrides);
       try {
-        await engine.start(next);
+        next = await startOrFallBack(next, () => plan(overrides));
       } catch {
         // Status carries the error and log tail.
       }
@@ -432,7 +490,7 @@ export default function contribute(server: PluginServerContext) {
   async function buildStatus(): Promise<Status> {
     const card = await gpu();
     const { values } = await readSettings();
-    const variant = card ? RUNTIME.variantFor(card, values.backend) : "cuda-12.4";
+    const { variant, wanted } = card ? await engineVariant(card, values.backend) : { variant: "cuda-12.4" as RuntimeVariant, wanted: "cuda-12.4" as RuntimeVariant };
     const ompInfo = await omp();
     npx ??= await hasNpx();
     // Cards report a bit under their advertised size (a "16 GB" RTX 5080 shows 15.9):
@@ -464,10 +522,13 @@ export default function contribute(server: PluginServerContext) {
     return {
       gpu: card,
       runtime: {
-        installed: !!findServerExe(variant),
-        label: runtimeLabel(variant),
-        sizeMb: RUNTIME.downloadMb(variant),
+        // Vulkan serving while ROCm is still to install: offer ROCm.
+        installed: !!findServerExe(wanted),
+        // Installed: the engine that serves right now, else the one the next load will use.
+        label: runtimeLabel(findServerExe(wanted) ? ((engine.isReady() ? engine.currentPlan()?.variant : null) ?? variant) : wanted),
+        sizeMb: RUNTIME.downloadMb(wanted),
         download: runtimeDownload(),
+        rocm: ((family) => (family === null ? null : ROCM.byDefault.includes(family) ? ("default" as const) : ("option" as const)))(card ? ROCM.familyFor(card) : null),
       },
       omp: { installed: !!ompInfo.command, version: ompInfo.version },
       node: npx,
@@ -573,7 +634,7 @@ export default function contribute(server: PluginServerContext) {
   server.handle(installRuntimeRpc, async () => {
     const card = await gpu();
     if (!card) return { ok: false, message: NO_GPU };
-    void installRuntime(await runtimeVariant(card));
+    void installEngines(card).catch(() => {});
     return { ok: true };
   });
 

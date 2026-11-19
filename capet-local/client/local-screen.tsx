@@ -24,7 +24,7 @@ import {
   type Progress,
   type Status,
 } from "../shared/rpc";
-import { budgetRaisedText, localSettings, settingsForModel, type LocalSettings, type Speculative } from "../shared/settings";
+import { budgetRaisedText, localSettings, settingsForModel, type Backend, type LocalSettings, type Speculative } from "../shared/settings";
 import { useToast } from "@getpaseo/plugin/client/react-native";
 import { detailRows, latestTurn } from "../shared/format";
 import { openExternal } from "./web";
@@ -165,6 +165,23 @@ export function LocalScreen({ theme, layout }: PluginScreenProps) {
             actionLabel={s.runtime.download?.state === "running" ? "Installation…" : "Installer"}
             disabled={!s.gpu || s.runtime.download?.state === "running"}
             onPress={() => installRuntime.mutate({})}
+          />
+        )}
+        {s.runtime.rocm && (
+          <SettingsSelect<Backend>
+            label="Type de moteur"
+            hint={
+              s.runtime.rocm === "default"
+                ? "ROCm est le moteur d'AMD. Sur les Radeon RX 9000, il évite que le pilote range une partie du modèle hors de la carte, ce qui ralentit beaucoup Vulkan. S'il ne démarre pas, l'IA locale revient d'elle-même à Vulkan."
+                : "ROCm est le moteur d'AMD. Sur cette carte, Vulkan écrit en général aussi vite ; ROCm lit plus vite les longs prompts et aide quand le modèle remplit la carte. À essayer : s'il ne démarre pas, l'IA locale revient d'elle-même à Vulkan."
+            }
+            value={values.backend}
+            options={[
+              { value: "auto", label: s.runtime.rocm === "default" ? "Automatique (ROCm d'AMD)" : "Automatique (Vulkan)" },
+              ...(s.runtime.rocm === "default" ? [] : [{ value: "rocm" as const, label: "ROCm d'AMD (expérimental)" }]),
+              ...(s.runtime.rocm === "default" ? [{ value: "vulkan" as const, label: "Vulkan" }] : []),
+            ]}
+            onValueChange={(backend) => save({ backend })}
           />
         )}
         <SettingsRow

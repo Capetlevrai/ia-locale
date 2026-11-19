@@ -47,6 +47,7 @@ export async function detectNvidiaGpu(): Promise<GpuInfo | null> {
         vramUsedMiB: Number(used),
         vramFreeMiB: Number(free),
         computeCap: Number(cap),
+        deviceId: 0,
       }));
     return biggest(gpus);
   } catch {
@@ -70,7 +71,7 @@ Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory 
 Get-ChildItem HKLM:\\SOFTWARE\\Microsoft\\DirectX | ForEach-Object { Get-ItemProperty $_.PSPath } |
   Where-Object { $_.Description -and $_.VendorId -ne 0x1414 -and $used.ContainsKey([int64]$_.AdapterLuid) } |
   Sort-Object LastSeen -Descending | Group-Object AdapterLuid | ForEach-Object { $_.Group[0] } |
-  ForEach-Object { "{0}|{1}|{2}|{3}" -f $_.VendorId, $_.DedicatedVideoMemory, $used[[int64]$_.AdapterLuid], $_.Description }
+  ForEach-Object { "{0}|{1}|{2}|{3}|{4}" -f $_.VendorId, $_.DedicatedVideoMemory, $used[[int64]$_.AdapterLuid], [int]$_.DeviceId, $_.Description }
 `;
 
 export async function detectOtherGpu(): Promise<GpuInfo | null> {
@@ -81,8 +82,8 @@ export async function detectOtherGpu(): Promise<GpuInfo | null> {
       .trim()
       .split(/\r?\n/)
       .map((line) => line.trim().split("|"))
-      .filter((f) => f.length >= 4 && Number(f[1]) > 0)
-      .map(([vendorId, total, used, ...name]) => {
+      .filter((f) => f.length >= 5 && Number(f[1]) > 0)
+      .map(([vendorId, total, used, deviceId, ...name]) => {
         const totalMiB = Math.round(Number(total) / MIB);
         const usedMiB = Math.min(totalMiB, Math.round(Number(used) / MIB));
         return {
@@ -93,6 +94,7 @@ export async function detectOtherGpu(): Promise<GpuInfo | null> {
           vramUsedMiB: usedMiB,
           vramFreeMiB: totalMiB - usedMiB,
           computeCap: 0,
+          deviceId: Number(deviceId) || 0,
         };
       });
     return biggest(gpus);
@@ -137,6 +139,7 @@ export function detectLinuxGpu(): GpuInfo | null {
       vramUsedMiB: usedMiB,
       vramFreeMiB: totalMiB - usedMiB,
       computeCap: 0,
+      deviceId: Number(read(join(device, "device"))) || 0,
     }];
   });
   return biggest(gpus);
@@ -179,6 +182,7 @@ export async function detectAppleGpu(): Promise<GpuInfo | null> {
     vramUsedMiB: limitMiB - freeMiB,
     vramFreeMiB: freeMiB,
     computeCap: 0,
+    deviceId: 0,
   };
 }
 
@@ -218,6 +222,59 @@ export async function vulkanCard(exe: string, gpuName: string): Promise<{ visibl
   }
 }
 
+export interface RocmCard {
+  /** --device name once the card is alone. */
+  device: string;
+  /** HIP_VISIBLE_DEVICES index that hides every other AMD chip, or null when the card is alone anyway. */
+  visible: string | null;
+}
+
+const rocmCards = new Map<string, RocmCard | null>();
+
+/**
+ * How the ROCm engine reaches this card, or null when it can't: it does not see it (the
+ * engine would then run on the CPU without a word), or it sees several chips and the card
+ * can't be isolated. With an integrated AMD chip next to the card, --device alone is not
+ * enough (llama.cpp #23152): the chip is hidden with HIP_VISIBLE_DEVICES, whose index is
+ * found by trying. Asked once per engine: the answer only changes with the driver.
+ */
+export async function rocmCard(exe: string, gpuName: string): Promise<RocmCard | null> {
+  if (existsSync(paths.rocmTest)) return { device: "none", visible: null };
+  const key = `${exe}|${gpuName}`;
+  const known = rocmCards.get(key);
+  if (known !== undefined) return known;
+  const norm = (s: string) => s.toLowerCase().replace(/\((r|tm)\)/g, "").replace(/\s+/g, " ").trim();
+  const mine = (name: string) => norm(name) === norm(gpuName) || norm(name).includes(norm(gpuName)) || norm(gpuName).includes(norm(name));
+  const list = async (env?: NodeJS.ProcessEnv) => {
+    const { stdout, stderr } = await execCommand(exe, ["--list-devices"], { timeout: 60_000, env });
+    const found: { device: string; name: string }[] = [];
+    for (const line of `${stdout}\n${stderr}`.split(/\r?\n/)) {
+      const match = /^\s*(ROCm\d+):\s*(.+?)\s*\(\d+ MiB/.exec(line);
+      if (match) found.push({ device: match[1], name: match[2] });
+    }
+    return found;
+  };
+  let card: RocmCard | null = null;
+  try {
+    const all = await list();
+    if (all.length === 1 && mine(all[0].name)) {
+      card = { device: all[0].device, visible: null };
+    } else if (all.some((found) => mine(found.name))) {
+      for (let index = 0; index < 8 && !card; index++) {
+        try {
+          const only = await list({ ...process.env, HIP_VISIBLE_DEVICES: String(index) });
+          if (only.length === 1 && mine(only[0].name)) card = { device: only[0].device, visible: String(index) };
+        } catch {
+          // Past the last device.
+        }
+      }
+    }
+  } catch {
+    // Missing library, old driver: not usable.
+  }
+  rocmCards.set(key, card);
+  return card;
+}
 /**
  * Windows: where the driver really put what this process allocated on the cards. An AMD
  * driver accepts an allocation it then keeps in system memory ("shared"), where the card

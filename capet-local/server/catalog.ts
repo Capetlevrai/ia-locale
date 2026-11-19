@@ -3,9 +3,110 @@
 
 import type { GpuInfo } from "../shared/rpc";
 import type { Backend } from "../shared/settings";
+import { existsSync } from "node:fs";
+import { paths } from "./paths";
 
-/** Windows: CUDA 12.4 / 13.5. Linux: CUDA 12.8 / 13.5. Vulkan on both. Metal on Apple Silicon Macs. */
-export type RuntimeVariant = "cuda-12.4" | "cuda-12.8" | "cuda-13.5" | "vulkan" | "metal";
+/** GPU families we run AMD's ROCm engine on (one archive each): discrete RDNA 2, 3 and 4. */
+export type RocmFamily = "gfx103X" | "gfx110X" | "gfx120X";
+
+/**
+ * Windows: CUDA 12.4 / 13.5 on NVIDIA, ROCm on the AMD cards it covers. Linux: CUDA 12.8 / 13.5.
+ * Vulkan on both for the rest. Metal on Apple Silicon Macs.
+ */
+export type RuntimeVariant = "cuda-12.4" | "cuda-12.8" | "cuda-13.5" | "vulkan" | "metal" | `rocm-${RocmFamily}`;
+
+export function isRocm(variant: RuntimeVariant): boolean {
+  return variant.startsWith("rocm-");
+}
+
+/**
+ * AMD's own engine (ROCm/HIP) for Windows, from lemonade-sdk/llamacpp-rocm (MIT): one zip
+ * per GPU family that carries the whole ROCm runtime, so the Adrenalin driver is all it
+ * needs. The official llama.cpp ROCm zip lacks hipblas.dll and silently runs on the CPU.
+ *
+ * Where it serves, from published measures (none of ours: we have no Radeon):
+ * - RX 9000 (gfx120X), by default. A 27B model with its context fills a 16 GB card, and past
+ *   ~9 GB on the card the Vulkan driver leaves buffers in shared memory (a tester's RX 9070
+ *   XT: 8 tok/s, 18.8 with 60 layers of 65). Stock ROCm: 36-40 tok/s on that card, Vulkan
+ *   21-22 when it fits (github.com/lnieuwenhuis/rdna4-27b-inference).
+ * - RX 7000 and 6000 (gfx110X, gfx103X), on request only. When the model fits in VRAM Vulkan
+ *   writes as fast or faster (RX 7900 XTX: 191 tok/s against 164); ROCm reads prompts faster.
+ * - Integrated chips (780M, 890M, 8060S...): never. Vulkan is faster there, and ROCm has
+ *   given wrong answers at full speed on them (llamacpp-rocm #123).
+ * Every launch checks that ROCm sees the card and loads onto it; Vulkan takes over otherwise.
+ *
+ * b1380 = llama.cpp build 12515 with a ROCm 10.3 nightly, which carries the fix for pinned
+ * host memory with an integrated chip next to the card (TheRock #9339). Its publisher runs
+ * inference on gfx1151 hardware only: these three archives are checked statically. Open on
+ * RX 9070 XT: prompts read 2.5x slower since b1357 with IQ3_XXS and a q8_0 cache (#155).
+ */
+export const ROCM = {
+  tag: "b1380",
+  repo: "lemonade-sdk/llamacpp-rocm",
+  /** Windows archives of that release: size (MB) and SHA-256, from its checksums.txt. */
+  families: {
+    gfx103X: { sizeMb: 550, sha256: "c52da701f8af8c0c4f5847d9f8d5470a096195a7f410d774eec244c3fbdfe5e2" },
+    gfx110X: { sizeMb: 540, sha256: "4667ac23ebef5108518b93845b45dbd21eb175e829d0c577db046b5ecdb74443" },
+    gfx120X: { sizeMb: 700, sha256: "72909a8824c26656a23263a24d5408076fec5aed08ada75aa1317b0393e1afec" },
+  } satisfies Record<RocmFamily, { sizeMb: number; sha256: string }>,
+  /** Families where ROCm is the automatic choice. The others get it on request. */
+  byDefault: ["gfx120X"] as RocmFamily[],
+  /**
+   * PCI device id of the chip -> family: what decides. An AMD chip that is not listed is
+   * not covered (RDNA 1, every integrated chip, a chip newer than this list) and Vulkan
+   * serves. From the Linux kernel (amdgpu_drv.c, kfd_device.c), pci.ids and libdrm's amdgpu.ids.
+   */
+  devices: {
+    // RDNA 2 discrete, Navi 21 to 24: RX 6950 XT to 6400, their M and S, Radeon PRO W6000.
+    gfx103X: [
+      0x73a0, 0x73a1, 0x73a2, 0x73a3, 0x73a5, 0x73a8, 0x73a9, 0x73ab, 0x73ac, 0x73ad, 0x73ae, 0x73af, 0x73bf,
+      0x73c0, 0x73c1, 0x73c3, 0x73da, 0x73db, 0x73dc, 0x73dd, 0x73de, 0x73df,
+      0x73e0, 0x73e1, 0x73e2, 0x73e3, 0x73e8, 0x73e9, 0x73ea, 0x73eb, 0x73ec, 0x73ed, 0x73ef, 0x73ff,
+      0x7420, 0x7421, 0x7422, 0x7423, 0x7424, 0x743f,
+    ],
+    // RDNA 3 discrete, Navi 31 to 33: RX 7900 to 7600, their M and S, Radeon PRO W7000.
+    gfx110X: [
+      0x744c, 0x7448, 0x7449, 0x744a, 0x744b, 0x745e, 0x747e, 0x7470, 0x7460, 0x7461,
+      0x7480, 0x7483, 0x7489, 0x7499, 0x749f, 0x73f0, 0x7487, 0x748b,
+    ],
+    // RDNA 4, Navi 48 and 44: RX 9070 XT / 9070 / 9060 XT / 9060 / 9050, Radeon AI PRO R9700 / R9600.
+    gfx120X: [0x7550, 0x7551, 0x7590],
+  } satisfies Record<RocmFamily, number[]>,
+  /**
+   * Card name -> family, only when the device id is unknown. Exact models, never ranges:
+   * an unknown model stays on Vulkan.
+   */
+  rules: [
+    [/\bradeon rx ?90(50|60|70)(?![0-9])/, "gfx120X"],
+    [/\bradeon ai pro r9(600|700)(?![0-9])/, "gfx120X"],
+    [/\bradeon rx ?7(300|400|500|600|650|700|800|900)(?![0-9])/, "gfx110X"],
+    [/\bradeon pro w7(400|500|600|700|800|900)(?![0-9])/, "gfx110X"],
+    [/\bradeon pro v710(?![0-9])/, "gfx110X"],
+    [/\bradeon rx ?6(300|400|450|500|550|600|650|700|750|800|850|900|950)(?![0-9])/, "gfx103X"],
+    [/\bradeon 6550s(?![0-9a-z])/, "gfx103X"],
+    [/\bradeon pro w6(300|400|500|600|800|900)(?![0-9])/, "gfx103X"],
+    [/\bradeon pro v620(?![0-9])/, "gfx103X"],
+  ] as [RegExp, RocmFamily][],
+  /** The family whose archive runs this card, or null. */
+  familyFor(gpu: Pick<GpuInfo, "vendor" | "name" | "deviceId">, platform: NodeJS.Platform = process.platform): RocmFamily | null {
+    if (platform !== "win32") return null;
+    if (existsSync(paths.rocmTest)) return "gfx120X";
+    if (gpu.vendor !== "amd") return null;
+    if (gpu.deviceId) {
+      const known = Object.entries(ROCM.devices).find(([, ids]) => ids.includes(gpu.deviceId));
+      return known ? (known[0] as RocmFamily) : null;
+    }
+    const name = gpu.name.toLowerCase().replace(/\(tm\)|\(r\)|™|®/g, " ").replace(/\s+/g, " ").trim();
+    const families = new Set(ROCM.rules.filter(([pattern]) => pattern.test(name)).map(([, family]) => family));
+    return families.size === 1 ? [...families][0] : null;
+  },
+  family(variant: RuntimeVariant): RocmFamily {
+    return variant.slice("rocm-".length) as RocmFamily;
+  },
+  asset(variant: RuntimeVariant): string {
+    return `llama-${ROCM.tag}-windows-rocm-${ROCM.family(variant)}-x64.zip`;
+  },
+};
 
 export interface HfFile {
   repo: string;
@@ -81,8 +182,10 @@ export const RUNTIME = {
    * tools and --fit all work; ~15 % slower writing, reading 2-3x slower, first prompt +15 s
    * (shader compile).
    */
-  variantFor(gpu: Pick<GpuInfo, "vendor" | "computeCap">, backend: Backend = "auto", platform: NodeJS.Platform = process.platform): RuntimeVariant {
+  variantFor(gpu: Pick<GpuInfo, "vendor" | "computeCap" | "name" | "deviceId">, backend: Backend = "auto", platform: NodeJS.Platform = process.platform): RuntimeVariant {
     if (platform === "darwin") return "metal";
+    const family = backend === "vulkan" ? null : ROCM.familyFor(gpu, platform);
+    if (family && (backend === "rocm" || ROCM.byDefault.includes(family))) return `rocm-${family}`;
     if (backend === "vulkan" || gpu.vendor !== "nvidia") return "vulkan";
     if (gpu.computeCap >= 12) return "cuda-13.5";
     return platform === "win32" ? "cuda-12.4" : "cuda-12.8";
@@ -91,6 +194,7 @@ export const RUNTIME = {
   assets(variant: RuntimeVariant, platform: NodeJS.Platform = process.platform): string[] {
     const { tag } = RUNTIME;
     if (variant === "metal") return [`llama-${tag}-bin-macos-arm64.tar.gz`];
+    if (isRocm(variant)) return [ROCM.asset(variant)];
     if (platform === "win32") {
       const engine = `llama-${tag}-bin-win-${variant}-x64.zip`;
       return variant === "vulkan" ? [engine] : [engine, `cudart-llama-bin-win-${variant}-x64.zip`];
@@ -100,6 +204,7 @@ export const RUNTIME = {
   },
   /** Approximate download, shown before it starts (MB). */
   downloadMb(variant: RuntimeVariant): number {
+    if (isRocm(variant)) return ROCM.families[ROCM.family(variant)].sizeMb;
     return variant === "vulkan" || variant === "metal" ? 30 : 650;
   },
 };
